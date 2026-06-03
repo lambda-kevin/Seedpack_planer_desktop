@@ -4,24 +4,51 @@ echo  SeedPack Planner - Generador de ejecutable
 echo ============================================================
 echo.
 
-REM Usar el Python del entorno virtual del proyecto
-set PYTHON=venv\Scripts\python.exe
-
-if not exist "%PYTHON%" (
-    echo  ERROR: No se encontro el entorno virtual en venv\
-    echo  Ejecuta este .bat desde la carpeta raiz de SEEDPACK
+REM ── 1. Verificar que Python este instalado en el sistema ──────────────────
+python --version >nul 2>&1
+if errorlevel 1 (
+    echo  ERROR: Python no encontrado en el sistema.
+    echo  Instala Python 3.x desde https://www.python.org y vuelve a intentarlo.
     pause
     exit /b 1
 )
 
-REM Verificar que pyinstaller este instalado en el venv
-%PYTHON% -m PyInstaller --version >nul 2>&1
-if errorlevel 1 (
-    echo  PyInstaller no encontrado en el venv. Instalando...
-    %PYTHON% -m pip install pyinstaller
+REM ── 2. Crear el entorno virtual si no existe ──────────────────────────────
+if not exist "venv\Scripts\python.exe" (
+    echo  Creando entorno virtual...
+    python -m venv venv
+    if errorlevel 1 (
+        echo  ERROR: No se pudo crear el entorno virtual.
+        pause
+        exit /b 1
+    )
+    echo  Entorno virtual creado.
     echo.
 )
 
+set PYTHON=venv\Scripts\python.exe
+
+REM ── 3. Instalar dependencias desde requirements.txt ───────────────────────
+echo  Instalando dependencias (esto puede tardar varios minutos)...
+%PYTHON% -m pip install --upgrade pip --quiet
+%PYTHON% -m pip install -r requirements.txt --quiet
+if errorlevel 1 (
+    echo  ERROR: Fallo la instalacion de dependencias.
+    pause
+    exit /b 1
+)
+echo  Dependencias instaladas.
+echo.
+
+REM ── 4. Instalar PyInstaller si no esta ───────────────────────────────────
+%PYTHON% -m PyInstaller --version >nul 2>&1
+if errorlevel 1 (
+    echo  Instalando PyInstaller...
+    %PYTHON% -m pip install pyinstaller --quiet
+    echo.
+)
+
+REM ── 5. Compilar el ejecutable ─────────────────────────────────────────────
 echo  Compilando SeedPack Planner.exe ...
 echo.
 
