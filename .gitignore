@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+build/
+dist/
+
+# Temporary files
+~$*
+
+# Claude Code
+.claude/
+
+# Executables
+*.exe
