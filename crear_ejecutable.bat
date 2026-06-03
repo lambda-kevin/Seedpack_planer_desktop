@@ -7,10 +7,22 @@ echo.
 REM ── 1. Verificar que Python este instalado en el sistema ──────────────────
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo  ERROR: Python no encontrado en el sistema.
-    echo  Instala Python 3.x desde https://www.python.org y vuelve a intentarlo.
+    echo  Python no encontrado. Intentando instalar automaticamente con winget...
+    echo.
+    winget install --id Python.Python.3.12 --source winget --silent --accept-package-agreements --accept-source-agreements
+    if errorlevel 1 (
+        echo.
+        echo  No se pudo instalar Python automaticamente.
+        echo  Por favor instala Python manualmente desde:
+        echo    https://www.python.org/downloads/
+        echo  Asegurate de marcar "Add Python to PATH" durante la instalacion.
+        pause
+        exit /b 1
+    )
+    echo.
+    echo  Python instalado. Reinicia este .bat para continuar.
     pause
-    exit /b 1
+    exit /b 0
 )
 
 REM ── 2. Crear el entorno virtual si no existe ──────────────────────────────
