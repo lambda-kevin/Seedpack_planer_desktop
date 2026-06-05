@@ -2,7 +2,7 @@
 """
 SeedPack Planner — 4 pestanas: Ordenes de Produccion + Dashboard + Plan Diario + Tablas Excel
 """
-import os, sys, threading, shutil, time
+import os, sys, threading, shutil, time, json
 from datetime import datetime
 from tkinter import filedialog, messagebox
 import tkinter as tk
@@ -77,6 +77,137 @@ SHEETS_CONFIG = {
     "Gestion_Pedidos":    {"header": 0, "cols": ["Codigo","Descripcion","Pedidos","Saldo Pendiente","Stock Bodega","OPs Proceso","Proyeccion ML","Disponible","Demanda Total","Deficit","Lote Minimo","A Producir","Estado","Justificacion"]},
     "Saldo_OPs":          {"header": 1, "cols": ["OP","Tipo","Cod. Producto","Referencia","Cant. Aprobada","Cant. Producida","Cant. Pendiente","Estado","Fecha Prog.","Compromiso"]},
     "Comparativa_Comercial": {"header": 2, "cols": None},
+}
+
+_MAPEOS_PATH = os.path.join(DATA_DIR, "column_mappings.json")
+
+# Esquema de columnas esperadas por archivo — usado por el modal de configuracion
+_COL_SCHEMA = {
+    "arch_ventas": {
+        "titulo": "Historial de Ventas",
+        "campos": [
+            ("Fecha Fra.",         "Fecha de la factura",                True),
+            ("Producto Terminado", "Nombre/descripcion del producto",    True),
+            ("Cantidad",           "Unidades vendidas",                  True),
+            ("Código",             "Codigo del producto (SKU)",          True),
+            ("Factura",            "Numero de factura",                  False),
+        ]
+    },
+    "arch_bodega": {
+        "titulo": "Bodega / Existencias",
+        "campos": [
+            ("Bodega",           "Nombre de la bodega",                  True),
+            ("Cód. PT",          "Codigo de producto terminado",        True),
+            ("Saldo",            "Unidades en inventario",               True),
+            ("Referencia",       "Descripcion del producto",             False),
+            ("Costo",            "Costo unitario",                       False),
+            ("Cant. Ingresada",  "Cantidad ingresada originalmente",     False),
+            ("OP/OC",            "Numero de OP o de OC",                 False),
+        ]
+    },
+    "arch_pedidos": {
+        "titulo": "Listado de Pedidos",
+        "campos": [
+            ("Pedido",           "Numero del pedido",                    True),
+            ("Fecha de entrega", "Fecha de entrega pactada",             True),
+            ("Código PT",        "Codigo del producto pedido",           True),
+            ("Referencia",       "Descripcion del producto",             True),
+            ("Cantidad",         "Cantidad pendiente / saldo",           True),
+            ("Cliente",          "Nombre del cliente",                   True),
+            ("Línea",            "Linea de producto",                    True),
+            ("Remisión",         "N. remision (si fue despachado)",      False),
+            ("Factura",          "N. factura (si fue facturado)",        False),
+        ]
+    },
+    "arch_ops_proc": {
+        "titulo": "OPs en Proceso",
+        "campos": [
+            ("OP",               "Numero de la orden",                   True),
+            ("Tipo de Trabajo",  "Tipo de trabajo",                      True),
+            ("Cód. Producto",    "Codigo del producto",                  True),
+            ("Referencia",       "Descripcion del producto",             True),
+            ("Cant. Aprobada",   "Cantidad aprobada en la OP",           True),
+            ("Fecha Programada", "Fecha programada de entrega",          True),
+            ("Cliente",          "Cliente de la orden",                  False),
+            ("Compromiso Cliente","Fecha compromiso con el cliente",     False),
+        ]
+    },
+    "arch_ops_hist": {
+        "titulo": "Historico de OPs",
+        "campos": [
+            ("Cód. Producto",    "Codigo del producto",                  True),
+            ("Referencia",       "Descripcion del producto",             True),
+            ("Cant. Aprobada",   "Cantidad aprobada",                    True),
+        ]
+    },
+    "arch_entradas": {
+        "titulo": "Entradas de Inventario",
+        "campos": [
+            ("OC",               "Numero de OC / OP de compra",          True),
+            ("Cantidad",         "Cantidad ingresada",                   True),
+            ("Prod. Terminado",  "Producto terminado",                   False),
+            ("Bodega Sale",      "Bodega destino",                       False),
+        ]
+    },
+}
+
+
+# Aliases que el pipeline ya maneja internamente — si alguno coincide, el campo esta cubierto
+_ALIAS_VALIDACION = {
+    "arch_ventas": {
+        "Fecha Fra.":         ["fecha fra.", "fecha factura", "fecha fac.", "fecha de factura"],
+        "Producto Terminado": ["producto terminado", "producto"],
+        "Cantidad":           ["cantidad", "cant.", "unidades"],
+        "Código":             ["código", "codigo", "cód.", "cod."],
+        "Factura":            ["factura"],
+    },
+    "arch_bodega": {
+        "Bodega":          ["bodega", "bodega sale", "bodega_sale", "almacen"],
+        "Cód. PT":         ["cód. pt", "cod. pt", "prod. terminado", "prod.terminado",
+                            "producto terminado"],
+        "Saldo":           ["saldo", "saldo en inventario", "saldo inventario",
+                            "cantidad", "cant.", "stock"],
+        "Referencia":      ["referencia", "referenciapt", "descripcion", "descripción",
+                            "producto", "nombre"],
+        "Costo":           ["costo", "vr. unitario", "vr unitario", "precio unitario"],
+        "Cant. Ingresada": ["cant. ingresada", "cant ingresada", "cantidad ingresada"],
+        "OP/OC":           ["op/oc", "o.p. / o.c.", "op / oc", "oc"],
+    },
+    "arch_pedidos": {
+        "Pedido":           ["pedido"],
+        "Fecha de entrega": ["fecha de entrega", "fecha de entrega lead time",
+                             "fecha entrega comercial"],
+        "Código PT":        ["código pt", "codigo pt", "cod pt", "codigo", "cód. pt"],
+        "Referencia":       ["referencia", "descripcion ", "descripcion", "descripción"],
+        "Cantidad":         ["cantidad", "saldo pendiente", "cant. pendiente"],
+        "Cliente":          ["cliente"],
+        "Línea":            ["línea", "linea"],
+        "Remisión":         ["remisión", "remision"],
+        "Factura":          ["factura"],
+    },
+    "arch_ops_proc": {
+        "OP":                 ["op"],
+        "Tipo de Trabajo":    ["tipo de trabajo", "tipo trabajo"],
+        "Cód. Producto":      ["cód. producto", "cod. producto", "código producto",
+                               "codigo producto"],
+        "Referencia":         ["referencia", "descripcion"],
+        "Cant. Aprobada":     ["cant. aprobada", "cantidad aprobada", "cant aprobada"],
+        "Fecha Programada":   ["fecha programada", "fecha prog."],
+        "Cliente":            ["cliente"],
+        "Compromiso Cliente": ["compromiso cliente", "compromiso", "fecha compromiso"],
+    },
+    "arch_ops_hist": {
+        "Cód. Producto":  ["cód. producto", "cod. producto", "código producto",
+                           "codigo producto"],
+        "Referencia":     ["referencia", "descripcion"],
+        "Cant. Aprobada": ["cant. aprobada", "cantidad aprobada", "cant aprobada"],
+    },
+    "arch_entradas": {
+        "OC":              ["oc"],
+        "Cantidad":        ["cantidad", "cant.", "cant. ingresada"],
+        "Prod. Terminado": ["prod. terminado", "prod.terminado", "producto terminado"],
+        "Bodega Sale":     ["bodega sale", "bodega_sale", "bodega"],
+    },
 }
 
 
@@ -265,6 +396,8 @@ class SeedPackPlanner:
         hdr.pack(fill="x", padx=24)
         tk.Label(hdr, text="ARCHIVOS DE ENTRADA", font=("Segoe UI", 8, "bold"),
                  bg=C_MAIN, fg=C_GRIS, anchor="w").pack(side="left")
+        self._make_btn(hdr, "  Mapeo de columnas  ", C_CANCEL, C_CANCEL_H,
+                       self._abrir_modal_columnas).pack(side="left", padx=(14, 0), ipady=2)
         tk.Label(hdr, text="6 requeridos + 1 opcional  •  formato .xlsx",
                  font=("Segoe UI", 8), bg=C_MAIN, fg=C_GRIS, anchor="e").pack(side="right")
         tk.Frame(parent, bg=C_DIVIDER, height=1).pack(fill="x", padx=24, pady=(6,16))
@@ -1239,6 +1372,528 @@ class SeedPackPlanner:
         self._tablas_loaded = ruta
 
 
+    # ═════════════════════════════════════════════════════════════════════════
+    # MODAL MAPEO DE COLUMNAS
+    # ═════════════════════════════════════════════════════════════════════════
+
+    def _cargar_mapeos_columnas(self):
+        if os.path.isfile(_MAPEOS_PATH):
+            try:
+                with open(_MAPEOS_PATH, encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _guardar_mapeos_columnas(self, mapeos):
+        try:
+            with open(_MAPEOS_PATH, "w", encoding="utf-8") as f:
+                json.dump(mapeos, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            messagebox.showerror("Error al guardar", str(e))
+
+    def _abrir_modal_columnas(self):
+        """Modal de configuracion de mapeo de columnas: nombre en Excel -> nombre interno."""
+        import pandas as _pd
+
+        modal = tk.Toplevel(self.root)
+        modal.title("Configuracion de Columnas")
+        modal.configure(bg=C_MAIN)
+        modal.resizable(True, True)
+        modal.minsize(840, 480)
+        modal.transient(self.root)
+        modal.grab_set()
+        self.root.update_idletasks()
+        mw, mh = 980, 700
+        x = self.root.winfo_rootx() + (self.root.winfo_width()  - mw) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - mh) // 2
+        modal.geometry(f"{mw}x{mh}+{max(0, x)}+{max(0, y)}")
+
+        # ── Header ────────────────────────────────────────────────────────────
+        hdr_f = tk.Frame(modal, bg=C_HEADER)
+        hdr_f.pack(fill="x")
+        tk.Label(hdr_f, text="  Configuracion de Columnas",
+                 font=("Segoe UI", 13, "bold"), bg=C_HEADER, fg="white").pack(side="left", padx=20, pady=12)
+        tk.Label(hdr_f,
+                 text="Si INEDITTO cambia el nombre de una columna, ajusta el mapeo aqui para que el pipeline siga funcionando.",
+                 font=("Segoe UI", 8), bg=C_HEADER, fg="#7EB8E0").pack(side="left", pady=12)
+
+        # ── Leer columnas reales de cada archivo cargado ───────────────────────
+        cols_por_archivo = {}
+        for cfg in ARCHIVOS:
+            key  = cfg["key"]
+            ruta = self.file_vars[key].get().strip()
+            cols = []
+            if ruta and os.path.isfile(ruta):
+                try:
+                    xls = _pd.ExcelFile(ruta)
+                    for sheet in xls.sheet_names[:4]:
+                        for hdr_row in [0, 1, 2, 3]:
+                            try:
+                                tmp = _pd.read_excel(ruta, sheet_name=sheet,
+                                                      header=hdr_row, nrows=1)
+                                real = [str(c).strip() for c in tmp.columns
+                                        if "Unnamed" not in str(c) and str(c).strip()]
+                                if len(real) >= 3:
+                                    cols = real; break
+                            except Exception:
+                                pass
+                        if cols:
+                            break
+                except Exception:
+                    pass
+            cols_por_archivo[key] = cols
+
+        mapeos = self._cargar_mapeos_columnas()
+
+        # ── Tab bar ────────────────────────────────────────────────────────────
+        keys_schema  = [k for k in _COL_SCHEMA if k in {c["key"] for c in ARCHIVOS}]
+        _tab_btns    = {}
+        _tab_inds    = {}
+        _tab_frames  = {}
+        _cur         = [None]
+
+        tab_bar = tk.Frame(modal, bg=C_CARD, padx=8)
+        tab_bar.pack(fill="x")
+        tk.Frame(modal, bg=C_DIVIDER, height=1).pack(fill="x")
+        content_wrap = tk.Frame(modal, bg=C_MAIN)
+        content_wrap.pack(fill="both", expand=True)
+
+        # ── Footer ────────────────────────────────────────────────────────────
+        footer = tk.Frame(modal, bg=C_CARD, pady=10)
+        footer.pack(fill="x", side="bottom")
+        tk.Frame(modal, bg=C_DIVIDER, height=1).pack(fill="x", side="bottom")
+
+        all_vars = {}   # {key: {campo_interno: StringVar}}
+
+        def _sel_tab(key):
+            _cur[0] = key
+            for k, f in _tab_frames.items():
+                f.pack_forget()
+            _tab_frames[key].pack(fill="both", expand=True)
+            for k, b in _tab_btns.items():
+                sel = (k == key)
+                b.configure(fg=C_ACENTO if sel else C_GRIS,
+                             font=("Segoe UI", 9, "bold") if sel else ("Segoe UI", 9),
+                             bg=C_CARD)
+                _tab_inds[k].configure(bg=C_ACENTO if sel else C_CARD)
+
+        for key in keys_schema:
+            schema    = _COL_SCHEMA[key]
+            file_cols = cols_por_archivo.get(key, [])
+            mapeo_key = mapeos.get(key, {})
+            loaded    = bool(file_cols)
+
+            # Boton de tab
+            col_wrap = tk.Frame(tab_bar, bg=C_CARD)
+            col_wrap.pack(side="left", fill="y")
+            dot = "●" if loaded else "○"
+            dot_color = C_SUCCESS if loaded else C_GRIS
+            btn_lbl = f" {schema['titulo']} "
+            btn = tk.Button(col_wrap, text=btn_lbl,
+                             font=("Segoe UI", 9), bg=C_CARD, fg=C_GRIS,
+                             relief="flat", padx=8, cursor="hand2", bd=0,
+                             activeforeground=C_ACENTO, activebackground="#EFF6FF",
+                             command=lambda k=key: _sel_tab(k))
+            btn.pack(side="top", pady=(6, 0))
+            # Indicador de archivo cargado
+            dot_lbl = tk.Label(col_wrap, text=dot, font=("Segoe UI", 7),
+                                bg=C_CARD, fg=dot_color)
+            dot_lbl.pack(side="top")
+            ind = tk.Frame(col_wrap, bg=C_CARD, height=3)
+            ind.pack(fill="x")
+            _tab_btns[key] = btn
+            _tab_inds[key] = ind
+
+            # Frame del tab
+            tf = tk.Frame(content_wrap, bg=C_MAIN)
+            _tab_frames[key] = tf
+            all_vars[key] = {}
+
+            # Barra de estado del archivo
+            ruta  = self.file_vars[key].get().strip()
+            fname = os.path.basename(ruta) if ruta else "No cargado"
+            sf    = tk.Frame(tf, bg=C_CARD, padx=20, pady=8)
+            sf.pack(fill="x")
+            tk.Label(sf, text=f"Archivo:  {fname}",
+                      font=("Segoe UI", 9, "bold"), bg=C_CARD, fg=C_TEXTO).pack(side="left")
+            estado_txt = ("  Cargado — columnas detectadas correctamente ✓" if loaded
+                           else "  Sin archivo cargado — escribe el nombre exacto de la columna")
+            tk.Label(sf, text=estado_txt, font=("Segoe UI", 8), bg=C_CARD,
+                      fg=C_SUCCESS if loaded else C_GRIS).pack(side="left", padx=6)
+
+            # Encabezados de la tabla
+            th = tk.Frame(tf, bg=C_HEADER)
+            th.pack(fill="x", padx=20, pady=(10, 0))
+            tk.Label(th, text="     Campo que espera el sistema   (* = requerido)",
+                      font=("Segoe UI", 9, "bold"), bg=C_HEADER, fg="white",
+                      anchor="w").pack(side="left", pady=8, padx=(0, 0))
+            tk.Label(th, text="Columna en tu archivo Excel",
+                      font=("Segoe UI", 9, "bold"), bg=C_HEADER, fg="white",
+                      anchor="w").pack(side="right", pady=8, padx=(0, 24))
+
+            # Canvas con scroll para las filas
+            canvas_wrap = tk.Frame(tf, bg="white")
+            canvas_wrap.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+            canvas  = tk.Canvas(canvas_wrap, bg="white", highlightthickness=0)
+            vsb     = ttk.Scrollbar(canvas_wrap, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=vsb.set)
+            vsb.pack(side="right", fill="y")
+            canvas.pack(side="left", fill="both", expand=True)
+            rows_f = tk.Frame(canvas, bg="white")
+            _win   = canvas.create_window((0, 0), window=rows_f, anchor="nw")
+            rows_f.bind("<Configure>", lambda e, c=canvas: c.configure(
+                scrollregion=c.bbox("all")))
+            canvas.bind("<Configure>", lambda e, c=canvas, w=_win: c.itemconfig(
+                w, width=e.width))
+            canvas.bind("<Enter>", lambda e, c=canvas: c.bind_all(
+                "<MouseWheel>", lambda ev, cv=c: cv.yview_scroll(int(-1*(ev.delta/120)), "units")))
+            canvas.bind("<Leave>", lambda e, c=canvas: c.unbind_all("<MouseWheel>"))
+
+            opciones = ["(Sin cambio)"] + file_cols
+
+            for i, (campo, descr, req) in enumerate(schema["campos"]):
+                row = tk.Frame(rows_f, bg="white")
+                row.pack(fill="x")
+
+                # Barra de acento lateral (azul=requerido, gris=opcional)
+                tk.Frame(row, bg=C_ACENTO if req else "#CBD5E1",
+                          width=4).pack(side="left", fill="y")
+
+                # Columna izquierda — espaciador fuerza ancho minimo 300px
+                lf = tk.Frame(row, bg="white")
+                lf.pack(side="left", fill="y")
+                tk.Frame(lf, bg="white", width=300, height=1).pack()
+                lpad = tk.Frame(lf, bg="white")
+                lpad.pack(anchor="w", padx=18, pady=16)
+                mark = " *" if req else ""
+                tk.Label(lpad, text=campo + mark,
+                          font=("Segoe UI", 10, "bold"), bg="white",
+                          fg=C_TEXTO if req else C_GRIS,
+                          anchor="w", wraplength=275).pack(anchor="w")
+                tk.Label(lpad, text=descr,
+                          font=("Segoe UI", 9), bg="white", fg="#64748B",
+                          anchor="w", wraplength=275,
+                          justify="left").pack(anchor="w", pady=(5, 0))
+
+                # Separador vertical
+                tk.Frame(row, bg="#F1F5F9", width=1).pack(
+                    side="left", fill="y", pady=10)
+
+                # Columna derecha — selector ocupa todo el ancho restante
+                rf = tk.Frame(row, bg="white")
+                rf.pack(side="left", fill="both", expand=True, padx=20, pady=16)
+
+                var = tk.StringVar()
+                all_vars[key][campo] = var
+                val_guardado = mapeo_key.get(campo, "")
+                var.set(val_guardado if val_guardado else "(Sin cambio)")
+
+                if loaded:
+                    cb = ttk.Combobox(rf, textvariable=var, values=opciones,
+                                       font=("Segoe UI", 10), state="readonly")
+                    cb.pack(fill="x", ipady=5)
+                    # Bloquear scroll sobre el combobox para que no cambie su valor accidentalmente
+                    cb.bind("<MouseWheel>", lambda e: "break")
+                    if val_guardado and val_guardado != campo and val_guardado in file_cols:
+                        cb.configure(foreground=C_ACENTO)
+                    elif val_guardado and val_guardado not in file_cols:
+                        cb.configure(foreground="#DC2626")
+                else:
+                    ent = tk.Entry(rf, textvariable=var, font=("Segoe UI", 10),
+                                    bg="#F8FAFC", fg=C_TEXTO, relief="flat", bd=0,
+                                    highlightthickness=1, highlightbackground=C_DIVIDER,
+                                    highlightcolor=C_ACENTO)
+                    ent.pack(fill="x", ipady=6)
+                    tk.Label(rf, text="Escribe el nombre exacto como aparece en el Excel",
+                              font=("Segoe UI", 7), bg="white", fg=C_GRIS
+                              ).pack(anchor="w", pady=(4, 0))
+
+                # Separador horizontal entre filas
+                tk.Frame(rows_f, bg="#E8EDF3", height=1).pack(fill="x")
+
+            tk.Label(tf, text="   * Campos requeridos — un mapeo incorrecto puede causar errores en el pipeline",
+                      font=("Segoe UI", 8, "italic"), bg="white", fg="#94A3B8").pack(
+                anchor="w", padx=20, pady=(8, 6))
+
+        # ── Acciones del footer ────────────────────────────────────────────────
+        def _guardar():
+            nuevo = {}
+            for k, campos_vars in all_vars.items():
+                m = {campo: var.get().strip()
+                     for campo, var in campos_vars.items()
+                     if var.get().strip() not in ("", "(Sin cambio)")}
+                if m:
+                    nuevo[k] = m
+            self._guardar_mapeos_columnas(nuevo)
+            messagebox.showinfo("Guardado",
+                                 "Mapeo de columnas guardado correctamente.\n\n"
+                                 "Se aplicara en el proximo Generar Plan de Produccion.")
+            modal.destroy()
+
+        def _limpiar():
+            if messagebox.askyesno("Limpiar mapeos",
+                                    "Se eliminaran todos los mapeos personalizados\n"
+                                    "y se usaran los nombres originales de siempre.\n\n"
+                                    "Continuar?"):
+                self._guardar_mapeos_columnas({})
+                modal.destroy()
+                self._abrir_modal_columnas()
+
+        self._make_btn(footer, "  Guardar cambios  ", C_ACENTO, C_ACENTO_H, _guardar).pack(side="right", ipady=6, padx=(8, 20))
+        self._make_btn(footer, "  Limpiar todo  ", "#DC2626", "#B91C1C", _limpiar).pack(side="right", ipady=6)
+        self._make_btn(footer, "  Cancelar  ", C_CANCEL, C_CANCEL_H, modal.destroy).pack(side="right", ipady=6, padx=(0, 8))
+
+        # Seleccionar primer tab
+        if keys_schema:
+            _sel_tab(keys_schema[0])
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # VALIDACIÓN AUTOMÁTICA DE COLUMNAS AL CARGAR ARCHIVO
+    # ═════════════════════════════════════════════════════════════════════════
+
+    def _leer_columnas_archivo(self, ruta):
+        """Lee las columnas reales de un Excel probando las primeras hojas y headers."""
+        import pandas as _pd
+        try:
+            xls = _pd.ExcelFile(ruta)
+            for sheet in xls.sheet_names[:4]:
+                for hdr_row in [0, 1, 2, 3]:
+                    try:
+                        tmp = _pd.read_excel(ruta, sheet_name=sheet,
+                                              header=hdr_row, nrows=1)
+                        real = [str(c).strip() for c in tmp.columns
+                                if "Unnamed" not in str(c) and str(c).strip()]
+                        if len(real) >= 3:
+                            return real
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return []
+
+    def _campo_cubierto(self, campo, clave, file_cols_lower, mapeos):
+        """True si el campo está cubierto: por nombre exacto, alias, patron o mapeo guardado."""
+        # Mapeo guardado por el usuario
+        mapeo = mapeos.get(clave, {})
+        if campo in mapeo:
+            return mapeo[campo].lower().strip() in file_cols_lower
+        # Aliases del pipeline
+        aliases = _ALIAS_VALIDACION.get(clave, {}).get(campo, [campo.lower().strip()])
+        for alias in aliases:
+            if alias.lower().strip() in file_cols_lower:
+                return True
+        # Patron especial: Cód. PT en bodega (cualquier col con "pt" y "cod")
+        if clave == "arch_bodega" and campo == "Cód. PT":
+            for col_l in file_cols_lower:
+                if "pt" in col_l and ("cód" in col_l or "cod" in col_l):
+                    return True
+        # OC en entradas: case-insensitive
+        if clave == "arch_entradas" and campo == "OC":
+            return "oc" in file_cols_lower
+        return False
+
+    def _sugerir_columna(self, campo, file_cols):
+        """Devuelve la columna del archivo más parecida al campo esperado, o None."""
+        if not file_cols:
+            return None
+        campo_norm  = campo.lower().replace(".", "").replace(" ", "")
+        campo_words = set(campo.lower().replace(".", "").split())
+        best_col, best_score = None, 0
+        for col in file_cols:
+            col_lower = col.lower().strip()
+            col_norm  = col_lower.replace(".", "").replace(" ", "")
+            if campo_norm in col_norm or col_norm in campo_norm:
+                score = 10 + len(min(campo_norm, col_norm, key=len))
+            else:
+                score = len(campo_words & set(col_lower.replace(".", "").split()))
+            if score > best_score:
+                best_score, best_col = score, col
+        return best_col if best_score > 0 else None
+
+    def _detectar_problemas(self, ruta, clave):
+        """Retorna lista de (campo, descr, sugerencia) para campos requeridos no encontrados."""
+        if clave not in _COL_SCHEMA:
+            return []
+        file_cols = self._leer_columnas_archivo(ruta)
+        if not file_cols:
+            return []
+        file_cols_lower = {c.lower().strip(): c for c in file_cols}
+        mapeos   = self._cargar_mapeos_columnas()
+        problemas = []
+        for campo, descr, req in _COL_SCHEMA[clave]["campos"]:
+            if not req:
+                continue
+            if not self._campo_cubierto(campo, clave, file_cols_lower, mapeos):
+                problemas.append((campo, descr,
+                                   self._sugerir_columna(campo, file_cols)))
+        return problemas
+
+    def _abrir_modal_validacion(self, ruta, clave, problemas, file_cols):
+        """Modal contextual que aparece solo cuando hay columnas requeridas sin mapear."""
+        schema  = _COL_SCHEMA.get(clave, {})
+        titulo  = schema.get("titulo", clave)
+        fname   = os.path.basename(ruta)
+        n       = len(problemas)
+        opciones = ["(Sin cambio)"] + file_cols
+
+        modal = tk.Toplevel(self.root)
+        modal.title(f"Revision de columnas — {fname}")
+        modal.configure(bg=C_MAIN)
+        modal.resizable(True, True)
+        modal.transient(self.root)
+        modal.grab_set()
+        mw = 780
+        mh = min(200 + n * 100 + 90, 620)
+        self.root.update_idletasks()
+        mx = self.root.winfo_rootx() + (self.root.winfo_width()  - mw) // 2
+        my = self.root.winfo_rooty() + (self.root.winfo_height() - mh) // 2
+        modal.geometry(f"{mw}x{mh}+{max(0, mx)}+{max(0, my)}")
+        modal.minsize(mw, 300)
+
+        # Header
+        hdr = tk.Frame(modal, bg=C_HEADER)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text=f"  Revision de columnas — {titulo}",
+                  font=("Segoe UI", 12, "bold"), bg=C_HEADER, fg="white"
+                  ).pack(side="left", padx=20, pady=12)
+
+        # Banner de advertencia
+        C_WARN    = "#92400E"; C_WARN_BG = "#FFFBEB"; C_WARN_BD = "#F59E0B"
+        banner = tk.Frame(modal, bg=C_WARN_BG)
+        banner.pack(fill="x")
+        tk.Frame(banner, bg=C_WARN_BD, width=5).pack(side="left", fill="y")
+        msg_f = tk.Frame(banner, bg=C_WARN_BG)
+        msg_f.pack(side="left", padx=14, pady=12)
+        plural_c = "s" if n > 1 else ""
+        plural_v = "n" if n > 1 else ""
+        tk.Label(msg_f,
+                  text=f"Se encontraron {n} campo{plural_c} requerido{plural_c} que no coincide{plural_v} con las columnas de  {fname}.",
+                  font=("Segoe UI", 9, "bold"), bg=C_WARN_BG, fg=C_WARN,
+                  anchor="w", justify="left").pack(anchor="w")
+        tk.Label(msg_f,
+                  text="Indica a qué columna del archivo corresponde cada campo, o continúa sin cambios.",
+                  font=("Segoe UI", 8), bg=C_WARN_BG, fg="#78350F",
+                  anchor="w").pack(anchor="w", pady=(3, 0))
+
+        # Encabezado de tabla
+        th = tk.Frame(modal, bg="#1E3A5F")
+        th.pack(fill="x", padx=20, pady=(14, 0))
+        tk.Label(th, text="  Campo que espera el sistema  (* = requerido)",
+                  font=("Segoe UI", 9, "bold"), bg="#1E3A5F", fg="white",
+                  anchor="w").pack(side="left", pady=7, padx=(0, 0))
+        tk.Label(th, text="Columna en tu archivo Excel",
+                  font=("Segoe UI", 9, "bold"), bg="#1E3A5F", fg="white",
+                  anchor="w").pack(side="right", pady=7, padx=(0, 16))
+
+        # Canvas con scroll para las filas
+        canvas_w = tk.Frame(modal, bg="white")
+        canvas_w.pack(fill="both", expand=True, padx=20, pady=(0, 4))
+        canvas = tk.Canvas(canvas_w, bg="white", highlightthickness=0)
+        vsb    = ttk.Scrollbar(canvas_w, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        rows_f = tk.Frame(canvas, bg="white")
+        _wid   = canvas.create_window((0, 0), window=rows_f, anchor="nw")
+        rows_f.bind("<Configure>", lambda e, c=canvas: c.configure(
+            scrollregion=c.bbox("all")))
+        canvas.bind("<Configure>", lambda e, c=canvas, w=_wid: c.itemconfig(
+            w, width=e.width))
+        canvas.bind("<Enter>", lambda e, c=canvas: c.bind_all(
+            "<MouseWheel>", lambda ev, cv=c: cv.yview_scroll(int(-1*(ev.delta/120)), "units")))
+        canvas.bind("<Leave>", lambda e, c=canvas: c.unbind_all("<MouseWheel>"))
+
+        vars_campos = {}
+
+        for i, (campo, descr, sugerencia) in enumerate(problemas):
+            rbg = "white" if i % 2 == 0 else "#FAFAFA"
+            row = tk.Frame(rows_f, bg=rbg)
+            row.pack(fill="x")
+
+            tk.Frame(row, bg=C_ACENTO, width=4).pack(side="left", fill="y")
+
+            lf = tk.Frame(row, bg=rbg)
+            lf.pack(side="left", fill="y")
+            tk.Frame(lf, bg=rbg, width=260, height=1).pack()
+            lpad = tk.Frame(lf, bg=rbg)
+            lpad.pack(anchor="w", padx=14, pady=14)
+            tk.Label(lpad, text=campo + " *",
+                      font=("Segoe UI", 10, "bold"), bg=rbg, fg=C_TEXTO,
+                      anchor="w", wraplength=240).pack(anchor="w")
+            tk.Label(lpad, text=descr,
+                      font=("Segoe UI", 8), bg=rbg, fg="#64748B",
+                      anchor="w", wraplength=240, justify="left").pack(anchor="w", pady=(4, 0))
+
+            tk.Frame(row, bg="#F1F5F9", width=1).pack(side="left", fill="y", pady=10)
+
+            rf = tk.Frame(row, bg=rbg)
+            rf.pack(side="left", fill="both", expand=True, padx=16, pady=14)
+
+            var = tk.StringVar()
+            vars_campos[campo] = var
+            var.set(sugerencia if sugerencia else "(Sin cambio)")
+
+            cb_row = tk.Frame(rf, bg=rbg)
+            cb_row.pack(fill="x")
+            cb = ttk.Combobox(cb_row, textvariable=var, values=opciones,
+                               font=("Segoe UI", 9), state="readonly")
+            cb.pack(side="left", fill="x", expand=True, ipady=5)
+            cb.bind("<MouseWheel>", lambda e: "break")
+
+            if sugerencia and sugerencia in file_cols:
+                tk.Label(cb_row, text=" sugerido ",
+                          font=("Segoe UI", 7, "bold"),
+                          bg="#DBEAFE", fg=C_ACENTO,
+                          padx=5, pady=2).pack(side="left", padx=(8, 0))
+
+            tk.Frame(rows_f, bg="#E8EDF3", height=1).pack(fill="x")
+
+        # Footer
+        tk.Frame(modal, bg=C_DIVIDER, height=1).pack(fill="x", side="bottom")
+        footer = tk.Frame(modal, bg=C_CARD, pady=10)
+        footer.pack(fill="x", side="bottom")
+
+        def _continuar():
+            modal.destroy()
+
+        def _guardar():
+            mapeos     = self._cargar_mapeos_columnas()
+            mapeo_clave = mapeos.get(clave, {})
+            for campo_k, var_k in vars_campos.items():
+                val = var_k.get().strip()
+                if val and val != "(Sin cambio)":
+                    mapeo_clave[campo_k] = val
+                elif campo_k in mapeo_clave:
+                    del mapeo_clave[campo_k]
+            if mapeo_clave:
+                mapeos[clave] = mapeo_clave
+            elif clave in mapeos:
+                del mapeos[clave]
+            self._guardar_mapeos_columnas(mapeos)
+            modal.destroy()
+            messagebox.showinfo(
+                "Mapeo guardado",
+                f"El mapeo para {fname} fue guardado.\n"
+                "Se aplicará automáticamente al ejecutar el pipeline.")
+
+        self._make_btn(footer, "  Guardar mapeo  ", C_ACENTO, C_ACENTO_H,
+                        _guardar).pack(side="right", ipady=6, padx=(8, 20))
+        self._make_btn(footer, "  Continuar sin cambios  ", C_CANCEL, C_CANCEL_H,
+                        _continuar).pack(side="right", ipady=6)
+
+    def _validar_archivo_cargado(self, ruta, clave):
+        """Orquesta la validación y abre el modal solo si hay columnas requeridas faltantes."""
+        if not ruta or not os.path.isfile(ruta) or clave not in _COL_SCHEMA:
+            return
+        try:
+            file_cols = self._leer_columnas_archivo(ruta)
+            problemas = self._detectar_problemas(ruta, clave)
+            if problemas:
+                self._abrir_modal_validacion(ruta, clave, problemas, file_cols)
+        except Exception:
+            pass  # Nunca bloquear al usuario por un error de validacion
+
     # ── Exportar Excel ────────────────────────────────────────────────────────
 
     def _exportar_excel(self):
@@ -1501,6 +2156,7 @@ class SeedPackPlanner:
             title="Seleccionar archivo Excel",
             filetypes=[("Archivos Excel","*.xlsx *.xls"), ("Todos los archivos","*.*")])
         if ruta:
+            ruta_final = ruta
             if cfg and cfg.get("preloaded") and cfg.get("default_file"):
                 # Archivos precargados: copiar a Archivos Historicos para persistir al reabrir
                 dest = os.path.join(DATA_DIR, "Archivos Historicos", cfg["default_file"])
@@ -1508,12 +2164,13 @@ class SeedPackPlanner:
                     os.makedirs(os.path.dirname(dest), exist_ok=True)
                     shutil.copy2(ruta, dest)
                     var.set(dest)
+                    ruta_final = dest
                     messagebox.showinfo(
                         "Archivo actualizado",
                         f"'{cfg['titulo']}' actualizado correctamente.\n\n"
                         f"Guardado en:\n{dest}")
                 except Exception as exc:
-                    var.set(ruta)  # si falla la copia, usar la ruta original
+                    var.set(ruta)
                     messagebox.showwarning(
                         "No se pudo copiar",
                         f"No se pudo guardar el archivo en Archivos Historicos:\n{exc}\n\n"
@@ -1522,6 +2179,13 @@ class SeedPackPlanner:
             else:
                 # Archivos manuales: usar directamente desde donde el usuario los tenga
                 var.set(ruta)
+
+            # Validar columnas del archivo cargado — abre modal solo si hay problemas
+            if cfg and cfg.get("key"):
+                clave = cfg["key"]
+                rv    = ruta_final
+                self.root.after(450, lambda r=rv, k=clave:
+                                self._validar_archivo_cargado(r, k))
 
     # ── Validacion ────────────────────────────────────────────────────────────
 
@@ -1954,15 +2618,48 @@ class SeedPackPlanner:
         except ImportError as exc:
             messagebox.showerror("Falta pandas", str(exc)); return
 
-        # ── Cuadro de pedidos (hoja Maestro) ──────────────────────────────────
+        # ── Cuadro de pedidos (hoja Maestro o primera hoja disponible) ───────
         try:
-            df_raw = pd.read_excel(path_cuadro, sheet_name="Maestro", header=3)
+            _xl_ped = pd.ExcelFile(path_cuadro)
+            df_raw  = None
+            if "Maestro" in _xl_ped.sheet_names:
+                try:
+                    _df_m = pd.read_excel(_xl_ped, sheet_name="Maestro", header=3)
+                    if any(str(c).upper() == "PEDIDO" for c in _df_m.columns):
+                        df_raw = _df_m
+                except Exception:
+                    pass
+            if df_raw is None:
+                df_raw = pd.read_excel(_xl_ped)   # fallback: primera hoja
+
+            # Aplicar mapeo personalizado de columnas si existe
+            try:
+                import json as _json
+                _mp = os.path.join(DATA_DIR, "column_mappings.json")
+                if os.path.isfile(_mp):
+                    _m = _json.load(open(_mp, encoding="utf-8")).get("arch_pedidos", {})
+                    _rn = {v: k for k, v in _m.items() if v and v in df_raw.columns and v != k}
+                    if _rn:
+                        df_raw = df_raw.rename(columns=_rn)
+            except Exception:
+                pass
+
             df_raw.columns = [str(c).strip() for c in df_raw.columns]
             col_up  = {c.upper(): c for c in df_raw.columns}
-            sp_col  = col_up.get("SALDO PENDIENTE", "SALDO PENDIENTE")
-            cod_col = col_up.get("CODIGO", col_up.get("CÓDIGO", "CODIGO"))
-            desc_col= col_up.get("DESCRIPCION", col_up.get("DESCRIPCIÓN", "DESCRIPCION"))
-            ped_col = col_up.get("PEDIDO", "PEDIDO")
+            sp_col  = (col_up.get("SALDO PENDIENTE")
+                       or col_up.get("CANTIDAD")
+                       or col_up.get("CANT.")
+                       or "SALDO PENDIENTE")
+            cod_col = (col_up.get("CODIGO")
+                       or col_up.get("CÓDIGO")
+                       or next((v for k, v in col_up.items()
+                                if "CODIGO" in k or "CÓDIGO" in k), None)
+                       or "CODIGO")
+            desc_col = (col_up.get("DESCRIPCION")
+                        or col_up.get("DESCRIPCIÓN")
+                        or col_up.get("REFERENCIA")
+                        or "DESCRIPCION")
+            ped_col  = col_up.get("PEDIDO", "PEDIDO")
 
             df_raw[sp_col] = pd.to_numeric(df_raw[sp_col], errors="coerce").fillna(0)
             needed = [c for c in [ped_col, cod_col, desc_col, sp_col] if c in df_raw.columns]
@@ -1998,7 +2695,7 @@ class SeedPackPlanner:
                             df_bod = df_bod.rename(columns={c: "Cód. PT"}); break
                 cb3 = {c.lower().strip(): c for c in df_bod.columns}
                 if "saldo" not in cb3:
-                    for alias in ("cantidad", "cant.", "stock"):
+                    for alias in ("saldo en inventario", "cantidad", "cant.", "stock"):
                         if alias in cb3:
                             df_bod = df_bod.rename(columns={cb3[alias]: "Saldo"}); break
                 if "Bodega" in df_bod.columns:

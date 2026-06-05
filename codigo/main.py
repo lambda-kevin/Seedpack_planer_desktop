@@ -47,15 +47,51 @@ def _gestion_pedidos(arch_pedidos, arch_bodega, arch_ops_proc,
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
-    # ── 1. Leer hoja Maestro del listado de pedidos ───────────────────────────
-    print("  Leyendo listado de pedidos (hoja Maestro)...")
-    df_raw = pd.read_excel(arch_pedidos, sheet_name="Maestro", header=3)
+    # ── 1. Leer hoja de pedidos (Maestro con header=3 o primera hoja disponible) ─
+    print("  Leyendo listado de pedidos...")
+    _xl_ped = pd.ExcelFile(arch_pedidos)
+    df_raw = None
+    if "Maestro" in _xl_ped.sheet_names:
+        try:
+            _df_m = pd.read_excel(_xl_ped, sheet_name="Maestro", header=3)
+            if any(str(c).upper() == "PEDIDO" for c in _df_m.columns):
+                df_raw = _df_m
+        except Exception:
+            pass
+    if df_raw is None:
+        df_raw = pd.read_excel(_xl_ped)
+
+    try:
+        import json as _json
+        _mp = os.path.normpath(os.path.join(BASE_DIR, "..", "app", "column_mappings.json"))
+        if os.path.isfile(_mp):
+            _m = _json.load(open(_mp, encoding="utf-8")).get("arch_pedidos", {})
+            _rn = {v: k for k, v in _m.items() if v and v in df_raw.columns and v != k}
+            if _rn:
+                df_raw = df_raw.rename(columns=_rn)
+    except Exception:
+        pass
+
     df_raw.columns = [str(c).strip() for c in df_raw.columns]
     col_up = {c.upper(): c for c in df_raw.columns}
 
-    sp_col   = col_up.get("SALDO PENDIENTE", "SALDO PENDIENTE")
-    cod_col  = col_up.get("CODIGO", col_up.get("CÓDIGO", "CODIGO"))
-    desc_col = col_up.get("DESCRIPCION", col_up.get("DESCRIPCIÓN", "DESCRIPCION"))
+    # Saldo pendiente: columna exacta o alias "Cantidad" (formato historico)
+    sp_col = (col_up.get("SALDO PENDIENTE")
+              or col_up.get("CANTIDAD")
+              or col_up.get("CANT.")
+              or "SALDO PENDIENTE")
+
+    # Codigo PT: exacto, con acento, o busqueda parcial (ej: "Código PT")
+    cod_col = (col_up.get("CODIGO")
+               or col_up.get("CÓDIGO")
+               or next((v for k, v in col_up.items()
+                        if "CODIGO" in k or "CÓDIGO" in k), None)
+               or "CODIGO")
+
+    desc_col = (col_up.get("DESCRIPCION")
+                or col_up.get("DESCRIPCIÓN")
+                or col_up.get("REFERENCIA")
+                or "DESCRIPCION")
     ped_col  = col_up.get("PEDIDO", "PEDIDO")
 
     df_raw[sp_col] = pd.to_numeric(df_raw[sp_col], errors="coerce").fillna(0)

@@ -10,6 +10,22 @@ SALIDA = BASE + "datos_pipeline/paso1_limpieza.xlsx"
 
 os.makedirs(os.path.dirname(SALIDA), exist_ok=True)
 
+
+def _aplicar_mapeos_usuario(df, clave):
+    """Renombra columnas segun el mapeo guardado por el usuario en column_mappings.json."""
+    import json as _json
+    _path = os.path.normpath(BASE + "column_mappings.json")
+    if not os.path.isfile(_path):
+        return df
+    try:
+        with open(_path, encoding="utf-8") as _f:
+            _m = _json.load(_f).get(clave, {})
+        _rename = {v: k for k, v in _m.items()
+                   if v and str(v) in df.columns and str(v) != str(k)}
+        return df.rename(columns=_rename) if _rename else df
+    except Exception:
+        return df
+
 # Algunos exports del ERP guardan números con coma como separador de miles
 # (ej: '-2,424.000'). openpyxl no puede parsearlos; este parche lo resuelve.
 try:
@@ -28,6 +44,7 @@ except Exception:
 def run(arch_ventas=None):
     src = arch_ventas if arch_ventas else VENTAS
     df = pd.read_excel(src, sheet_name="Ventas por producto")
+    df = _aplicar_mapeos_usuario(df, "arch_ventas")
     df.columns = [str(c).strip() for c in df.columns]
 
     df = df.rename(columns={

@@ -57,6 +57,22 @@ ARCH_LOTE_MIN  = RUTA_AH + "Codigos lote minimo.xlsx"
 ARCH_ENTRADAS        = None  # opcional: entradas de inventario para cruce OC vs OPs
 ARCH_PLAN_COMERCIAL  = None  # opcional: plan comercial para comparativa vs ML
 
+
+def _aplicar_mapeos_usuario(df, clave):
+    """Renombra columnas segun el mapeo guardado por el usuario en column_mappings.json."""
+    import json as _json
+    _path = os.path.normpath(BASE + "column_mappings.json")
+    if not os.path.isfile(_path):
+        return df
+    try:
+        with open(_path, encoding="utf-8") as _f:
+            _m = _json.load(_f).get(clave, {})
+        _rename = {v: k for k, v in _m.items()
+                   if v and str(v) in df.columns and str(v) != str(k)}
+        return df.rename(columns=_rename) if _rename else df
+    except Exception:
+        return df
+
 # ── Configuracion ─────────────────────────────────────────────────────────────
 LEAD_TIME_DIAS = 3                        # dias habiles de anticipacion para ocasionales
 DIAS_SEMANA    = "Mon Tue Wed Thu Fri Sat" # dias laborables (incluye sabado)
@@ -140,6 +156,7 @@ def _label_semana(ts):
 
 def _normalizar_bodega(df):
     """Homogeniza columnas del archivo de bodega independientemente del formato exportado."""
+    df   = _aplicar_mapeos_usuario(df, "arch_bodega")
     cols = {c.lower().strip(): c for c in df.columns}
 
     # Columna bodega (filtro de obsoletos)
@@ -162,10 +179,10 @@ def _normalizar_bodega(df):
                 df = df.rename(columns={c: "Cód. PT"})
                 break
 
-    # Columna saldo (ExistBodega tiene "Saldo" real; entradasInventario tiene "Cantidad" = entradas)
+    # Columna saldo (ExistBodega tiene "Saldo" real; EBPT tiene "Saldo en Inventario")
     cols = {c.lower().strip(): c for c in df.columns}
     if "saldo" not in cols:
-        for alias in ("cantidad", "cant.", "stock"):
+        for alias in ("saldo en inventario", "cantidad", "cant.", "stock"):
             if alias in cols:
                 df = df.rename(columns={cols[alias]: "Saldo"})
                 break
@@ -197,7 +214,7 @@ def _normalizar_bodega(df):
     # Referencia / descripción del producto
     cols = {c.lower().strip(): c for c in df.columns}
     if "referencia" not in cols:
-        for alias in ("descripcion", "descripción", "producto", "nombre"):
+        for alias in ("referenciapt", "descripcion", "descripción", "producto", "nombre"):
             if alias in cols:
                 df = df.rename(columns={cols[alias]: "Referencia"})
                 break
@@ -233,6 +250,7 @@ def _cargar_ops_proceso():
              dict (codigo_pt, año, mes) -> cantidad total).
     """
     df = pd.read_excel(ARCH_OPS_PROC)
+    df = _aplicar_mapeos_usuario(df, "arch_ops_proc")
     df["Fecha Programada"]   = pd.to_datetime(df["Fecha Programada"],   errors="coerce")
     df["Compromiso Cliente"] = pd.to_datetime(df["Compromiso Cliente"], errors="coerce")
     df["Cant. Aprobada"]     = pd.to_numeric(df["Cant. Aprobada"],     errors="coerce").fillna(0)
@@ -252,6 +270,7 @@ def _cargar_ops_proceso():
 def _build_name_code_map():
     """Mapeos bidireccionales nombre<->codigo desde ventas historicas + OPs."""
     _v = pd.read_excel(ARCH_VENTAS)
+    _v = _aplicar_mapeos_usuario(_v, "arch_ventas")
     _prod_col = "Producto Terminado" if "Producto Terminado" in _v.columns else "Producto"
     ventas = _v[["Código", _prod_col]].dropna().rename(columns={_prod_col: "Producto"})
     freq   = (ventas.groupby(["Producto", "Código"]).size()
@@ -261,7 +280,9 @@ def _build_name_code_map():
                           .set_index("Código")["Producto"].to_dict())
     # Complementar con OPs historico (codigos sin nombre en ventas)
     try:
-        ops_h = pd.read_excel(ARCH_OPS_HIST)[["Cód. Producto", "Referencia"]].dropna()
+        ops_h = pd.read_excel(ARCH_OPS_HIST)
+        ops_h = _aplicar_mapeos_usuario(ops_h, "arch_ops_hist")
+        ops_h = ops_h[["Cód. Producto", "Referencia"]].dropna()
         for _, row in ops_h.iterrows():
             c = str(row["Cód. Producto"]).strip()
             n = str(row["Referencia"]).strip()
@@ -276,6 +297,7 @@ def _infer_batch_sizes():
     """Mediana del tamano de lote por codigo_pt desde historico de OPs."""
     try:
         ops = pd.read_excel(ARCH_OPS_HIST)
+        ops = _aplicar_mapeos_usuario(ops, "arch_ops_hist")
         ops["Cant. Aprobada"] = pd.to_numeric(ops["Cant. Aprobada"], errors="coerce")
         ops = ops.dropna(subset=["Cant. Aprobada", "Cód. Producto"])
         ops = ops[ops["Cant. Aprobada"] > 0]
@@ -289,32 +311,30 @@ def _normalizar_pedidos(df):
     """Normaliza columnas del archivo de pedidos al formato estandar interno."""
     cols = {c.strip().lower(): c for c in df.columns}
 
-    if "fecha de entrega" in cols:
-        return df  # ya esta en formato esperado
+    if "fecha de entrega" not in cols:
+        rename = {}
+        for destino, candidatos in [
+            ("Fecha de entrega", ["fecha de entrega lead time", "fecha entrega comercial",
+                                  "fecha de entrega"]),
+            ("Código PT",        ["codigo"]),
+            ("Referencia",       ["descripcion ", "descripcion"]),
+            ("Cantidad",         ["saldo pendiente", "cantidad"]),
+            ("Pedido",           ["pedido"]),
+            ("Cliente",          ["cliente"]),
+            ("Línea",            ["linea"]),
+        ]:
+            for cand in candidatos:
+                if cand in cols:
+                    rename[cols[cand]] = destino
+                    break
 
-    rename = {}
-    for destino, candidatos in [
-        ("Fecha de entrega", ["fecha de entrega lead time", "fecha entrega comercial",
-                              "fecha de entrega"]),
-        ("Código PT",        ["codigo"]),
-        ("Referencia",       ["descripcion ", "descripcion"]),
-        ("Cantidad",         ["saldo pendiente", "cantidad"]),
-        ("Pedido",           ["pedido"]),
-        ("Cliente",          ["cliente"]),
-        ("Línea",            ["linea"]),
-    ]:
-        for cand in candidatos:
-            if cand in cols:
-                rename[cols[cand]] = destino
-                break
+        df = df.rename(columns=rename)
 
-    df = df.rename(columns=rename)
+        # Si no hay Código PT usar Referencia como clave (productos ocasionales sin codigo)
+        if "Código PT" not in df.columns and "Referencia" in df.columns:
+            df["Código PT"] = df["Referencia"]
 
-    # Si no hay Código PT usar Referencia como clave (productos ocasionales sin codigo)
-    if "Código PT" not in df.columns and "Referencia" in df.columns:
-        df["Código PT"] = df["Referencia"]
-
-    # Sintetizar columnas de filtro antiguas que no existen en el nuevo formato
+    # Siempre garantizar columnas de filtro (pueden faltar en formatos historicos)
     for col in ("Remisión", "Factura"):
         if col not in df.columns:
             df[col] = np.nan
@@ -343,6 +363,7 @@ def _cargar_pedidos(FI, FF):
     if df is None:
         df = pd.read_excel(xl)   # fallback: primera hoja / formato original
 
+    df = _aplicar_mapeos_usuario(df, "arch_pedidos")
     df = _normalizar_pedidos(df)
     df["Fecha de entrega"] = pd.to_datetime(df["Fecha de entrega"], errors="coerce")
     df["Cantidad"]         = pd.to_numeric(df["Cantidad"], errors="coerce").fillna(0)
@@ -1222,6 +1243,7 @@ def _hoja_saldo_ops(wb, ops_df, entradas_df):
 
     # Mapa OC → cant. producida (suma de Cantidad por OC)
     entradas_df = entradas_df.copy()
+    entradas_df = _aplicar_mapeos_usuario(entradas_df, "arch_entradas")
     oc_col  = next((c for c in entradas_df.columns if c.upper().strip() == "OC"), None)
     qty_col = next((c for c in entradas_df.columns
                     if c.lower().strip() in ("cantidad", "cant.", "cant. ingresada")), None)
