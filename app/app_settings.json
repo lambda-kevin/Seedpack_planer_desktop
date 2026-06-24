@@ -1,0 +1,12 @@
+{
+  "file_paths": {
+    "arch_ventas": "C:\\Users\\EQUIPO\\Documents\\PROYECTOS DESARROLLO SOFTWARE\\Lambda\\SEEDPACK\\app\\Archivos Historicos\\ventasXproducto.xlsx",
+    "arch_ops_hist": "C:\\Users\\EQUIPO\\Documents\\PROYECTOS DESARROLLO SOFTWARE\\Lambda\\SEEDPACK\\app\\Archivos Historicos\\INEDITTO_OP.xlsx",
+    "arch_pedidos": "C:/Users/EQUIPO/Desktop/22 06/22 06/FD-002 Cuadro de pedidos 2026.xlsx",
+    "arch_ops_proc": "C:/Users/EQUIPO/Desktop/22 06/22 06/INEDITTO_OP.xlsx",
+    "arch_bodega": "C:/Users/EQUIPO/Desktop/22 06/22 06/INEDITTO_EBPT.xlsx",
+    "arch_lote_min": "C:\\Users\\EQUIPO\\Documents\\PROYECTOS DESARROLLO SOFTWARE\\Lambda\\SEEDPACK\\app\\Archivos Historicos\\Codigos lote minimo.xlsx",
+    "arch_entradas": "C:/Users/EQUIPO/Desktop/22 06/22 06/INEDITTO_entradasInventario.xlsx",
+    "arch_plan_comercial": "C:\\Users\\EQUIPO\\Documents\\PROYECTOS DESARROLLO SOFTWARE\\Lambda\\SEEDPACK\\app\\Archivos Historicos\\plan_comercial.xlsx"
+  }
+}
