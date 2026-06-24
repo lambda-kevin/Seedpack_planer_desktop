@@ -31,12 +31,13 @@ def run():
     resumen["cluster_id"] = kmeans.fit_predict(X)
 
     centroides = resumen.groupby("cluster_id")["frecuencia_anual_promedio"].mean()
-    cluster_frecuente  = centroides.idxmax()   # noqa: F841
-    cluster_esporadico = centroides.idxmin()   # noqa: F841
+    cluster_frecuente  = centroides.idxmax()
+    cluster_esporadico = centroides.idxmin()
 
-    resumen["cluster"] = resumen["frecuencia_anual_promedio"].apply(
-        lambda x: "esporadico" if x <= 6 else "frecuente"
-    )
+    resumen["cluster"] = resumen["cluster_id"].map({
+        cluster_frecuente:  "frecuente",
+        cluster_esporadico: "esporadico",
+    })
 
     resumen = resumen.drop(columns="cluster_id").sort_values("frecuencia_anual_promedio")
 

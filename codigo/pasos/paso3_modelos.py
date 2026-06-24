@@ -131,7 +131,9 @@ def crear_features(df, target="cantidad"):
     return df
 
 
-def preparar_train_test(df, año_corte=2026, target="cantidad"):
+def preparar_train_test(df, año_corte=None, target="cantidad"):
+    if año_corte is None:
+        año_corte = int(df["año"].max())
     FEATURE_COLS = [
         "mes", "mes_sin", "mes_cos", "trimestre", "año", "producto_enc",
         f"{target}_lag1",  f"{target}_lag2",  f"{target}_lag3",

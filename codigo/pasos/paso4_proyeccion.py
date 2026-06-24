@@ -5,7 +5,7 @@ Uso:
     from paso4_proyeccion import proyectar
 
     proyectar(
-        FI  = "2026-04-01",
+        FI  = "2026-06-01",   # primer dia del mes actual (o fecha personalizada)
         FF  = "2026-12-31",
         MOD = "Random Forest",       # "Random Forest" | "XGBoost" | "Reg. Regularizada" | "Red Neuronal"
         REF = "NOMBRE PRODUCTO",     # opcional — si se omite proyecta todos los frecuentes
@@ -158,7 +158,7 @@ def proyectar(FI, FF, MOD="Random Forest", REF=None, target="cantidad"):
     """
     Parametros
     ----------
-    FI  : str  — fecha inicio  ej. "2026-04-01"
+    FI  : str  — fecha inicio  ej. "2026-06-01"
     FF  : str  — fecha fin     ej. "2026-12-31"
     MOD : str  — modelo a usar: "Random Forest" | "XGBoost" |
                                 "Reg. Regularizada" | "Red Neuronal"
@@ -242,8 +242,10 @@ def proyectar(FI, FF, MOD="Random Forest", REF=None, target="cantidad"):
 if __name__ == "__main__":
 
     # Fecha inicio y fecha fin de la proyeccion (formato "YYYY-MM-DD")
-    FI = "2026-04-01"
-    FF = "2026-12-31"
+    from datetime import datetime as _dt
+    _hoy_p4 = _dt.today()
+    FI = _hoy_p4.replace(day=1).strftime("%Y-%m-%d")
+    FF = _dt(_hoy_p4.year, 12, 31).strftime("%Y-%m-%d")
 
     # Modelo a usar — elige UNA de las siguientes opciones:
     #   "Random Forest"

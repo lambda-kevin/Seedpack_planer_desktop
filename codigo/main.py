@@ -22,8 +22,10 @@ import paso4_proyeccion
 import paso5_orden_produccion
 
 # ── Parametros de proyeccion (PASO 4) ─────────────────────────────────────────
-FI  = "2026-04-01"   # Fecha inicio
-FF  = "2026-12-31"   # Fecha fin
+from datetime import datetime as _dt
+_hoy = _dt.today()
+FI  = _hoy.replace(day=1).strftime("%Y-%m-%d")    # Primer dia del mes actual
+FF  = _dt(_hoy.year, 12, 31).strftime("%Y-%m-%d") # Ultimo dia del año actual
 MOD = "Random Forest"  # Modelo: "Random Forest" | "XGBoost" | "Reg. Regularizada" | "Red Neuronal"
 REF = None             # Producto especifico o None para todos
 
@@ -65,7 +67,8 @@ def _gestion_pedidos(arch_pedidos, arch_bodega, arch_ops_proc,
         import json as _json
         _mp = os.path.normpath(os.path.join(BASE_DIR, "..", "app", "column_mappings.json"))
         if os.path.isfile(_mp):
-            _m = _json.load(open(_mp, encoding="utf-8")).get("arch_pedidos", {})
+            with open(_mp, encoding="utf-8") as _f:
+                _m = _json.load(_f).get("arch_pedidos", {})
             _rn = {v: k for k, v in _m.items() if v and v in df_raw.columns and v != k}
             if _rn:
                 df_raw = df_raw.rename(columns=_rn)
@@ -319,13 +322,8 @@ def run(FI, FF, REF=None,
 
     separador("PASO 5 — Ordenes de produccion")
     t0 = time.time()
-    paso5_orden_produccion.run(FI=FI, FF=FF, MOD=MOD, REF=REF)
+    _, ruta_output = paso5_orden_produccion.run(FI=FI, FF=FF, MOD=MOD, REF=REF)
     print(f"  ✓ Completado en {time.time() - t0:.1f}s")
-
-    _data = (os.path.dirname(sys.executable) if getattr(sys, 'frozen', False)
-             else os.path.join(BASE_DIR, "..", "app"))
-    ruta_output = os.path.normpath(
-        os.path.join(_data, "Resultado Final", "orden_produccion_final.xlsx"))
 
     if arch_pedidos and os.path.isfile(arch_pedidos):
         separador("PASO 6 — Gestion de pedidos")
@@ -336,9 +334,9 @@ def run(FI, FF, REF=None,
 
     duracion = time.time() - inicio_total
     separador(f"PIPELINE COMPLETADO en {duracion:.0f}s")
-    print(f"  Resultado Final en : {os.path.normpath(_data)}/Resultado Final/")
-    print(f"  Graficas en        : {os.path.normpath(_data)}/graficas/")
+    print(f"  Resultado Final en : {os.path.dirname(ruta_output)}")
     print()
+    return ruta_output
 
 
 def main():

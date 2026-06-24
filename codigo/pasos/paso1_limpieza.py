@@ -20,8 +20,11 @@ def _aplicar_mapeos_usuario(df, clave):
     try:
         with open(_path, encoding="utf-8") as _f:
             _m = _json.load(_f).get(clave, {})
-        _rename = {v: k for k, v in _m.items()
-                   if v and str(v) in df.columns and str(v) != str(k)}
+        # Normalizar con strip para que espacios en el Excel no rompan el matching
+        _cols = {str(c).strip(): c for c in df.columns}
+        _rename = {_cols[str(v).strip()]: k
+                   for k, v in _m.items()
+                   if v and str(v).strip() in _cols and _cols[str(v).strip()] != str(k)}
         return df.rename(columns=_rename) if _rename else df
     except Exception:
         return df
@@ -43,17 +46,30 @@ except Exception:
 
 def run(arch_ventas=None):
     src = arch_ventas if arch_ventas else VENTAS
-    df = pd.read_excel(src, sheet_name="Ventas por producto")
-    df = _aplicar_mapeos_usuario(df, "arch_ventas")
+    try:
+        df = pd.read_excel(src, sheet_name="Ventas por producto")
+    except Exception:
+        df = pd.read_excel(src)
+    # Strip antes del mapeo para que columnas con espacios no rompan el matching
     df.columns = [str(c).strip() for c in df.columns]
+    df = _aplicar_mapeos_usuario(df, "arch_ventas")
 
-    df = df.rename(columns={
-        "Fecha Fra.": "fecha",
-        "Factura":    "factura",
-        "Producto Terminado": "producto",
-        "Producto":   "producto",
-        "Cantidad":   "cantidad",
-    })
+    # Rename case-insensitive con todos los alias conocidos
+    _cols_l = {c.lower(): c for c in df.columns}
+    _alias_rename = [
+        ("fecha",    ["fecha fra.", "fecha factura", "fecha fac.", "fecha de factura"]),
+        ("producto", ["producto terminado", "producto"]),
+        ("cantidad", ["cantidad", "cant.", "unidades"]),
+        ("factura",  ["factura"]),
+    ]
+    _rename = {}
+    for tgt, candidates in _alias_rename:
+        for alias in candidates:
+            orig = _cols_l.get(alias)
+            if orig and orig not in _rename:
+                _rename[orig] = tgt
+                break
+    df = df.rename(columns=_rename)
 
     df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
     df = df.dropna(subset=["fecha", "producto"])

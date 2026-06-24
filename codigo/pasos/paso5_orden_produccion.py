@@ -9,8 +9,8 @@ Genera un plan de produccion diario basado en:
   - Pedidos pendientes (referencias ocasionales)
 
 Parametros (editar en el bloque __main__):
-  FI  : fecha inicio  ej. "2026-04-23"
-  FF  : fecha fin     ej. "2026-12-31"
+  FI  : fecha inicio  ej. "2026-06-01"  (por defecto: primer dia del mes actual)
+  FF  : fecha fin     ej. "2026-12-31"  (por defecto: ultimo dia del año actual)
   MOD : modelo       "Random Forest" | "XGBoost" | "Reg. Regularizada" | "Red Neuronal"
   REF : producto     nombre exacto, o None para todos
 
@@ -67,8 +67,11 @@ def _aplicar_mapeos_usuario(df, clave):
     try:
         with open(_path, encoding="utf-8") as _f:
             _m = _json.load(_f).get(clave, {})
-        _rename = {v: k for k, v in _m.items()
-                   if v and str(v) in df.columns and str(v) != str(k)}
+        # Normalizar con strip para que espacios en el Excel no rompan el matching
+        _cols = {str(c).strip(): c for c in df.columns}
+        _rename = {_cols[str(v).strip()]: k
+                   for k, v in _m.items()
+                   if v and str(v).strip() in _cols and _cols[str(v).strip()] != str(k)}
         return df.rename(columns=_rename) if _rename else df
     except Exception:
         return df
@@ -247,13 +250,31 @@ def _cargar_bodega_df():
 def _cargar_ops_proceso():
     """
     Retorna (DataFrame de OPs en proceso,
-             dict (codigo_pt, año, mes) -> cantidad total).
+             dict (codigo_pt, año, mes) -> cantidad pendiente total).
+
+    Usa Cant. Pendiente = max(0, Cant. Aprobada - Cant. Ingresada) cuando
+    la columna Cant. Ingresada existe en el archivo; de lo contrario usa
+    Cant. Aprobada completa como estimado conservador.
     """
     df = pd.read_excel(ARCH_OPS_PROC)
     df = _aplicar_mapeos_usuario(df, "arch_ops_proc")
     df["Fecha Programada"]   = pd.to_datetime(df["Fecha Programada"],   errors="coerce")
     df["Compromiso Cliente"] = pd.to_datetime(df["Compromiso Cliente"], errors="coerce")
     df["Cant. Aprobada"]     = pd.to_numeric(df["Cant. Aprobada"],     errors="coerce").fillna(0)
+
+    # Detectar columna de cantidad ya producida/ingresada
+    _ing_aliases = ("cant. ingresada", "cant ingresada", "cantidad ingresada",
+                    "cant. producida", "cant producida", "cantidad producida")
+    _ing_col = next(
+        (c for c in df.columns if c.lower().strip() in _ing_aliases), None
+    )
+    if _ing_col:
+        df["Cant. Ingresada"] = pd.to_numeric(df[_ing_col], errors="coerce").fillna(0)
+    else:
+        df["Cant. Ingresada"] = 0.0
+
+    # Pendiente real: lo que falta por producir en cada OP
+    df["Cant. Pendiente"] = (df["Cant. Aprobada"] - df["Cant. Ingresada"]).clip(lower=0)
 
     ops_supply = {}
     for _, row in df.iterrows():
@@ -262,7 +283,7 @@ def _cargar_ops_proceso():
         if pd.isna(fp) or not codigo:
             continue
         key = (codigo, fp.year, fp.month)
-        ops_supply[key] = ops_supply.get(key, 0.0) + float(row["Cant. Aprobada"])
+        ops_supply[key] = ops_supply.get(key, 0.0) + float(row["Cant. Pendiente"])
 
     return df, ops_supply
 
@@ -402,17 +423,56 @@ _MESES_ES_INV = {
 
 def _cargar_plan_comercial(path):
     """
-    Lee el Plan Comercial detectando dinámicamente las columnas de meses.
+    Lee el Plan Comercial detectando dinamicamente hoja, header y columnas de meses.
+
+    Tolerancias:
+    - Hoja: prueba nombres conocidos y cae al primer sheet con datos.
+    - Header: prueba filas 0-3 hasta encontrar una con columnas utiles.
+    - Meses: solo toma columnas de CANTIDAD (descarta las de Valor/Precio).
+    - Nombre producto: acepta "producto terminado", "producto", "referencia", "descripcion".
+
     Retorna (DataFrame: codigo/año/mes/cantidad_comercial, dict codigo->nombre).
-    Las cantidades se redondean al entero más cercano.
     """
-    df = pd.read_excel(path, sheet_name="Plan comercial UNDS", header=0)
+    xl = pd.ExcelFile(path)
+    sheets = xl.sheet_names
+
+    # Intentar hojas conocidas primero, luego cualquier hoja con datos
+    _HOJAS_CONOCIDAS = ["Plan comercial UNDS", "Plan Comercial UNDS",
+                        "plan comercial unds", "PLAN COMERCIAL UNDS"]
+    _HOJAS_PRIORIDAD = [s for s in _HOJAS_CONOCIDAS if s in sheets]
+    _HOJAS_BUSQUEDA  = _HOJAS_PRIORIDAD + [s for s in sheets if s not in _HOJAS_PRIORIDAD]
+
+    df = None
+    for sheet in _HOJAS_BUSQUEDA:
+        for hdr_row in [0, 1, 2, 3]:
+            try:
+                tmp = pd.read_excel(xl, sheet_name=sheet, header=hdr_row)
+                # Necesitamos al menos: codigo + nombre + 1 columna de mes
+                cols_lower = [str(c).lower() for c in tmp.columns]
+                tiene_mes  = any(mes in " ".join(cols_lower) for mes in _MESES_ES_INV)
+                tiene_cod  = any(c in ("código", "codigo", "cód.", "cod.") for c in cols_lower)
+                if tiene_mes and tiene_cod and len(tmp) > 0:
+                    df = tmp
+                    break
+            except Exception:
+                pass
+        if df is not None:
+            break
+
+    if df is None:
+        return pd.DataFrame(columns=["codigo", "año", "mes", "cantidad_comercial"]), {}
+
+    # Renombrar primera columna a "codigo"
     df.rename(columns={df.columns[0]: "codigo"}, inplace=True)
     df["codigo"] = df["codigo"].astype(str).str.strip()
+    df = df[df["codigo"].str.len() > 0].copy()
 
-    # Extraer mapa codigo->nombre del producto antes de agregar
-    nombre_col = next((c for c in df.columns
-                       if str(c).lower().strip() in ("producto", "referencia", "descripcion")), None)
+    # Mapa codigo -> nombre del producto
+    _NOMBRE_ALIAS = ("producto terminado", "producto", "referencia",
+                     "descripcion", "descripción", "nombre")
+    nombre_col = next(
+        (c for c in df.columns if str(c).lower().strip() in _NOMBRE_ALIAS), None
+    )
     nombre_map = {}
     if nombre_col:
         nombre_map = (df[["codigo", nombre_col]]
@@ -421,9 +481,14 @@ def _cargar_plan_comercial(path):
                       .set_index("codigo")[nombre_col]
                       .astype(str).str.strip().to_dict())
 
+    # Detectar columnas de meses — solo CANTIDAD (excluir Valor/Precio/$)
+    _EXCLUIR_KW = ("valor", "vr.", "precio", "price", "$", "total", "promedio", "prom")
     month_cols = {}
     for col in df.columns:
         col_lower = str(col).lower()
+        # Descartar columnas de valor o promedios
+        if any(kw in col_lower for kw in _EXCLUIR_KW):
+            continue
         for mes_es, mes_num in _MESES_ES_INV.items():
             if mes_es in col_lower:
                 yr_match = re.search(r"\b(20\d{2})\b", str(col))
@@ -469,28 +534,40 @@ def _redondear_a_lote(cantidad, lote):
 
 def _aplicar_lote_minimo(mrp_df, lote_min):
     """
-    Ajusta neto_producir en mrp_df al multiplo superior de lote_minimo.
-    Agrega columnas 'lote_minimo' y 'neto_sin_ajuste' para trazabilidad.
+    Garantiza que mrp_df tiene las columnas 'lote_minimo' y 'neto_sin_ajuste'.
+    Cuando _mrp_mensual recibio lote_min (caso normal), el ajuste ya esta hecho
+    y el rollforward de stock es coherente; esta funcion solo completa columnas
+    faltantes para compatibilidad con llamadas externas.
     """
     df = mrp_df.copy()
-    df["lote_minimo"]    = df["codigo_pt"].map(lote_min).fillna(0).astype(int)
-    df["neto_sin_ajuste"] = df["neto_producir"]
-    df["neto_producir"]   = df.apply(
-        lambda r: _redondear_a_lote(r["neto_producir"], r["lote_minimo"]), axis=1
-    )
+    if "lote_minimo" not in df.columns:
+        df["lote_minimo"] = df["codigo_pt"].map(lote_min).fillna(0).astype(int)
+    if "neto_sin_ajuste" not in df.columns:
+        # Columna ausente: el ajuste no se habia aplicado aun — aplicar ahora.
+        df["neto_sin_ajuste"] = df["neto_producir"]
+        df["neto_producir"]   = df.apply(
+            lambda r: _redondear_a_lote(r["neto_producir"], r["lote_minimo"]), axis=1
+        )
     return df
 
 
 # ── MRP Mensual ───────────────────────────────────────────────────────────────
 
-def _mrp_mensual(proj_df, stock, ops_supply, name_to_code):
+def _mrp_mensual(proj_df, stock, ops_supply, name_to_code, lote_min=None):
     """
     Calcula cantidad neta a producir por (codigo_pt, año, mes).
     El inventario se consume mes a mes (rollforward).
 
     stock_cierre(mes N) = stock_inicio(mes N+1)
-    neto = max(0, demanda - stock_inicio - ops_que_completan_ese_mes)
+    neto_sin_aj = max(0, demanda - stock_inicio - ops_que_completan_ese_mes)
+    neto_producir = ceil(neto_sin_aj / lote_min) * lote_min   <- ajuste incluido
+    stock_cierre  = max(0, stock_inicio + ops + neto_producir - demanda)
+
+    El exceso de produccion por lote minimo se acredita como inventario
+    disponible para el mes siguiente, evitando sobre-produccion acumulada.
     """
+    _lote = lote_min or {}
+
     p = proj_df.copy()
     p["codigo_pt"] = p["producto"].map(name_to_code)
     p = p.dropna(subset=["codigo_pt"])
@@ -511,10 +588,13 @@ def _mrp_mensual(proj_df, stock, ops_supply, name_to_code):
         mes     = int(row["mes"])
         demanda = float(row["demanda"])
 
-        inv     = stock_act.get(codigo, 0.0)
-        ops_mes = ops_supply.get((codigo, año, mes), 0.0)
-        neto    = max(0.0, demanda - inv - ops_mes)
-        cierre  = max(0.0, inv + ops_mes - demanda)
+        inv          = stock_act.get(codigo, 0.0)
+        ops_mes      = ops_supply.get((codigo, año, mes), 0.0)
+        neto_sin_aj  = max(0.0, demanda - inv - ops_mes)
+        lm           = _lote.get(codigo, 0)
+        neto_prod    = _redondear_a_lote(neto_sin_aj, lm)
+        # stock_cierre incluye el exceso generado por el redondeo de lote
+        cierre       = max(0.0, inv + ops_mes + neto_prod - demanda)
         stock_act[codigo] = cierre
 
         resultados.append({
@@ -526,7 +606,9 @@ def _mrp_mensual(proj_df, stock, ops_supply, name_to_code):
             "demanda_proyectada": round(demanda),
             "stock_inicio":       round(inv),
             "ops_proceso_mes":    round(ops_mes),
-            "neto_producir":      round(neto),
+            "neto_sin_ajuste":    round(neto_sin_aj),
+            "lote_minimo":        lm,
+            "neto_producir":      round(neto_prod),
             "stock_cierre":       round(cierre),
         })
 
@@ -760,7 +842,8 @@ def _hoja_plan_mensual(wb, plan_df):
                .reindex(columns=orden_meses, fill_value=0)
                .reset_index())
 
-    total_col = 2 + len(orden_meses)
+    COL_TOTAL  = 2 + len(orden_meses) + 1   # columna "Total Periodo"
+    total_col  = COL_TOTAL
     ws.merge_cells(f"A1:{get_column_letter(total_col)}1")
     ws["A1"] = "SEEDPACK - PLAN DE PRODUCCION MENSUAL"
     ws["A1"].font      = Font(name="Calibri", bold=True, color="FFFFFF", size=14)
@@ -775,6 +858,8 @@ def _hoja_plan_mensual(wb, plan_df):
     for pi, mes in enumerate(orden_meses, 3):
         hdr(ws, 2, pi, mes, bg=C_AZUL_MED, wrap=True)
         ws.column_dimensions[get_column_letter(pi)].width = 14
+    hdr(ws, 2, COL_TOTAL, "Total Periodo", bg=C_VERDE, wrap=True)
+    ws.column_dimensions[get_column_letter(COL_TOTAL)].width = 16
     ws.row_dimensions[2].height = 30
 
     codigos_pa = set(plan_df[plan_df.get("categoria", pd.Series(dtype=str)) == "Pedido Activo"]["codigo_pt"]) \
@@ -787,8 +872,10 @@ def _hoja_plan_mensual(wb, plan_df):
         fc_ref = C_MORADO if es_pa else "000000"
         dat(ws, r, 1, row["codigo_pt"],  bg=bg, align="center", fc=fc_ref, bold=es_pa)
         dat(ws, r, 2, row["referencia"], bg=bg, fc=fc_ref, bold=es_pa)
+        fila_total = 0
         for pi, mes in enumerate(orden_meses, 3):
             val = int(row.get(mes, 0))
+            fila_total += val
             if val > 0:
                 c = ws.cell(row=r, column=pi, value=val)
                 c.font         = Font(name="Calibri", bold=True, size=10, color=C_MORADO if es_pa else C_AZUL_OSC)
@@ -798,20 +885,152 @@ def _hoja_plan_mensual(wb, plan_df):
                 c.alignment    = Alignment(horizontal="right", vertical="center")
             else:
                 dat(ws, r, pi, "-", bg=bg, align="center")
+        # Total periodo
+        ct = ws.cell(row=r, column=COL_TOTAL, value=fila_total)
+        ct.font         = Font(name="Calibri", bold=True, size=10, color="166534")
+        ct.fill         = _fill("D4EDDA")
+        ct.border       = _border
+        ct.number_format = "#,##0"
+        ct.alignment    = Alignment(horizontal="right", vertical="center")
         r += 1
 
     dat(ws, r, 1, "TOTAL MES", bg=C_AZUL_OSC, bold=True, fc="FFFFFF", align="center")
     dat(ws, r, 2, "",          bg=C_AZUL_OSC)
+    gran_total = 0
     for pi, mes in enumerate(orden_meses, 3):
         tot = int(pivot[mes].sum()) if mes in pivot.columns else 0
+        gran_total += tot
         c = ws.cell(row=r, column=pi, value=tot)
         c.font         = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
         c.fill         = _fill(C_AZUL_MED)
         c.border       = _border
         c.number_format = "#,##0"
         c.alignment    = Alignment(horizontal="right", vertical="center")
+    ct = ws.cell(row=r, column=COL_TOTAL, value=gran_total)
+    ct.font         = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+    ct.fill         = _fill(C_VERDE)
+    ct.border       = _border
+    ct.number_format = "#,##0"
+    ct.alignment    = Alignment(horizontal="right", vertical="center")
 
     ws.freeze_panes = "C3"
+
+
+def _hoja_resumen_mrp(wb, mrp_df):
+    """
+    Hoja de trazabilidad MRP: muestra por (producto, mes) todos los componentes
+    del calculo de produccion neta antes y despues del ajuste por lote minimo.
+
+    Columnas: Codigo PT | Referencia | Periodo | Demanda ML | Stock Inicio |
+              OPs Proceso | Neto s/Ajuste | Lote Min | Neto Final | Stock Cierre
+    """
+    ws = wb.create_sheet("Resumen_MRP")
+
+    if mrp_df is None or mrp_df.empty:
+        ws["A1"] = "Sin datos de MRP en el periodo"
+        return
+
+    COLS = [
+        ("Codigo PT",       16),
+        ("Referencia",      42),
+        ("Periodo",         14),
+        ("Demanda ML",      15),
+        ("Stock Inicio",    15),
+        ("OPs Proceso",     15),
+        ("Neto s/Ajuste",   15),
+        ("Lote Min",        12),
+        ("Neto Final",      15),
+        ("Stock Cierre",    15),
+    ]
+    n = len(COLS)
+
+    ws.merge_cells(f"A1:{get_column_letter(n)}1")
+    ws["A1"] = "SEEDPACK - DETALLE MRP MENSUAL  (Demanda - Stock - OPs en Proceso = Neto a Producir)"
+    ws["A1"].font      = Font(name="Calibri", bold=True, color="FFFFFF", size=13)
+    ws["A1"].fill      = _fill(C_AZUL_OSC)
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 28
+
+    for ci, (h, w) in enumerate(COLS, 1):
+        hdr(ws, 2, ci, h, bg=C_AZUL_OSC, wrap=True)
+        ws.column_dimensions[get_column_letter(ci)].width = w
+    ws.row_dimensions[2].height = 32
+
+    df = mrp_df.sort_values(["codigo_pt", "año", "mes"]).reset_index(drop=True)
+
+    # Totales por columna para la fila de cierre
+    tot_demanda = tot_stock_i = tot_ops = tot_neto_s = tot_neto_f = 0
+
+    r = 3
+    prev_codigo = None
+    for _, row in df.iterrows():
+        codigo   = str(row.get("codigo_pt", ""))
+        cambio   = (codigo != prev_codigo)
+        prev_codigo = codigo
+
+        bg = C_ALT if r % 2 == 0 else C_BLANCO
+        demanda   = int(row.get("demanda_proyectada", 0))
+        stock_i   = int(row.get("stock_inicio",       0))
+        ops_mes   = int(row.get("ops_proceso_mes",    0))
+        neto_s    = int(row.get("neto_sin_ajuste",    row.get("neto_producir", 0)))
+        lote_m    = int(row.get("lote_minimo",        0))
+        neto_f    = int(row.get("neto_producir",      0))
+        stock_c   = int(row.get("stock_cierre",       0))
+
+        tot_demanda += demanda
+        tot_stock_i += stock_i
+        tot_ops     += ops_mes
+        tot_neto_s  += neto_s
+        tot_neto_f  += neto_f
+
+        dat(ws, r, 1, codigo,                     bg=bg, align="center", bold=cambio)
+        dat(ws, r, 2, str(row.get("producto","")),bg=bg, bold=cambio)
+        dat(ws, r, 3, str(row.get("periodo","")), bg=bg, align="center")
+        dat(ws, r, 4, demanda, bg=bg, fmt="#,##0", align="right")
+        dat(ws, r, 5, stock_i, bg=bg, fmt="#,##0", align="right",
+            fc=C_VERDE if stock_i >= demanda else ("000000"))
+        dat(ws, r, 6, ops_mes, bg=bg, fmt="#,##0", align="right",
+            fc=C_AZUL_MED if ops_mes > 0 else "000000")
+        dat(ws, r, 7, neto_s,  bg=bg, fmt="#,##0", align="right")
+
+        # Lote min: resaltar cuando hubo ajuste
+        ajuste = (neto_f != neto_s and neto_s > 0)
+        dat(ws, r, 8, lote_m if lote_m > 0 else "-",
+            bg=C_AMARILLO if ajuste else bg, align="center")
+
+        # Neto final: verde si es 0 (cubierto), azul oscuro si hay produccion
+        c9 = ws.cell(row=r, column=9, value=neto_f)
+        c9.font         = Font(name="Calibri", size=10, bold=(neto_f > 0),
+                               color=C_AZUL_OSC if neto_f > 0 else "166534")
+        c9.fill         = _fill(C_ALT if neto_f > 0 else "D4EDDA")
+        c9.border       = _border
+        c9.number_format = "#,##0"
+        c9.alignment    = Alignment(horizontal="right", vertical="center")
+
+        dat(ws, r, 10, stock_c, bg=bg, fmt="#,##0", align="right")
+        r += 1
+
+    # Fila de totales
+    dat(ws, r, 1, "TOTAL", bg=C_AZUL_OSC, bold=True, fc="FFFFFF", align="center")
+    dat(ws, r, 2, "",      bg=C_AZUL_OSC)
+    dat(ws, r, 3, "",      bg=C_AZUL_OSC)
+    for ci, val in enumerate([tot_demanda, tot_stock_i, tot_ops, tot_neto_s], 4):
+        c = ws.cell(row=r, column=ci, value=val)
+        c.font = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+        c.fill = _fill(C_AZUL_MED); c.border = _border
+        c.number_format = "#,##0"
+        c.alignment = Alignment(horizontal="right", vertical="center")
+    dat(ws, r, 8, "", bg=C_AZUL_OSC)
+    ct = ws.cell(row=r, column=9, value=tot_neto_f)
+    ct.font = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+    ct.fill = _fill(C_VERDE); ct.border = _border
+    ct.number_format = "#,##0"
+    ct.alignment = Alignment(horizontal="right", vertical="center")
+    dat(ws, r, 10, "", bg=C_AZUL_OSC)
+
+    ws.freeze_panes = "D3"
+    if r > 3:
+        ws.auto_filter.ref = f"A2:{get_column_letter(n)}{r - 1}"
 
 
 def _hoja_calendario_semanal(wb, plan_df):
@@ -896,19 +1115,74 @@ def _hoja_calendario_semanal(wb, plan_df):
     ws.freeze_panes = "C3"
 
 
+def _enriquecer_ops_con_entradas(ops_df, entradas_df):
+    """Agrega Cant. Producida, Cant. Pendiente y Estado a ops_df cruzando por OC."""
+    ent = _aplicar_mapeos_usuario(entradas_df.copy(), "arch_entradas")
+    oc_col  = next((c for c in ent.columns if c.upper().strip() == "OC"), None)
+    qty_col = next((c for c in ent.columns
+                    if c.lower().strip() in ("cantidad", "cant.", "cant. ingresada")), None)
+    prod_dict = {}
+    if oc_col and qty_col:
+        ent[oc_col]  = pd.to_numeric(ent[oc_col],  errors="coerce")
+        ent[qty_col] = pd.to_numeric(ent[qty_col], errors="coerce").fillna(0)
+        prod_dict = ent.groupby(oc_col)[qty_col].sum().to_dict()
+
+    producidas, pendientes, estados = [], [], []
+    for _, row in ops_df.iterrows():
+        aprobada = float(row.get("Cant. Aprobada", 0) or 0)
+        try:
+            op_key = float(row.get("OP", ""))
+        except (ValueError, TypeError):
+            op_key = None
+        producida = float(prod_dict.get(op_key, 0)) if op_key is not None else 0.0
+        pendiente = max(0.0, aprobada - producida)
+        pct = producida / aprobada * 100 if aprobada > 0 else 0.0
+        if pct >= 100:
+            estado = "Completada"
+        elif producida > 0:
+            estado = "En Proceso"
+        else:
+            estado = "Sin Iniciar"
+        producidas.append(producida)
+        pendientes.append(pendiente)
+        estados.append(estado)
+
+    ops_df = ops_df.copy()
+    ops_df["Cant. Producida"] = producidas
+    ops_df["Cant. Pendiente"] = pendientes
+    ops_df["Estado"] = estados
+    return ops_df
+
+
 def _hoja_ops_proceso(wb, ops_df):
     ws = wb.create_sheet("OPs_En_Proceso")
 
-    ws.merge_cells("A1:H1")
+    tiene_saldo = "Cant. Producida" in ops_df.columns
+
+    # Color map para estado
+    _ESTADO_BG = {"Completada": "D4EDDA", "En Proceso": "FFF3CD", "Sin Iniciar": "FFE4E4"}
+    _ESTADO_FC = {"Completada": "166534", "En Proceso": "92400E", "Sin Iniciar": "991B1B"}
+
+    if tiene_saldo:
+        n_cols = 11
+        cols = [("OP", 8), ("Tipo de Trabajo", 18), ("Cod. Producto", 18),
+                ("Referencia", 42), ("Cliente", 28),
+                ("Cant. Aprobada", 15), ("Cant. Producida", 15), ("Cant. Pendiente", 15),
+                ("Estado", 14), ("Fecha Programada", 18), ("Compromiso Cliente", 18)]
+    else:
+        n_cols = 8
+        cols = [("OP", 8), ("Tipo de Trabajo", 18), ("Cod. Producto", 18),
+                ("Referencia", 42), ("Cliente", 28),
+                ("Cant. Aprobada", 15), ("Fecha Programada", 18), ("Compromiso Cliente", 18)]
+
+    last_col = get_column_letter(n_cols)
+    ws.merge_cells(f"A1:{last_col}1")
     ws["A1"] = "ORDENES DE PRODUCCION EN PROCESO"
     ws["A1"].font = Font(name="Calibri", bold=True, color="FFFFFF", size=13)
     ws["A1"].fill = _fill(C_AZUL_OSC)
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 28
 
-    cols = [("OP", 8), ("Tipo de Trabajo", 18), ("Cod. Producto", 18),
-            ("Referencia", 42), ("Cliente", 28),
-            ("Cant. Aprobada", 15), ("Fecha Programada", 18), ("Compromiso Cliente", 18)]
     for ci, (h, w) in enumerate(cols, 1):
         hdr(ws, 2, ci, h, wrap=True)
         ws.column_dimensions[get_column_letter(ci)].width = w
@@ -930,17 +1204,41 @@ def _hoja_ops_proceso(wb, ops_df):
             int(cant) if cant > 0 else "Sin definir",
             bg=bg, fmt="#,##0", align="right",
             fc=C_ROJO if cant == 0 else "000000")
-        dat(ws, r, 7,
-            fp.date() if pd.notna(fp) else "-",
-            bg=bg, fmt="DD/MM/YYYY", align="center")
-        dat(ws, r, 8,
-            cc.date() if pd.notna(cc) else "-",
-            bg=bg, fmt="DD/MM/YYYY", align="center")
+
+        if tiene_saldo:
+            producida = float(row.get("Cant. Producida", 0) or 0)
+            pendiente = float(row.get("Cant. Pendiente", 0) or 0)
+            estado    = str(row.get("Estado", "Sin Iniciar"))
+            ebg = _ESTADO_BG.get(estado, bg)
+            efc = _ESTADO_FC.get(estado, "000000")
+            dat(ws, r, 7, int(producida), bg=bg, fmt="#,##0", align="right")
+            dat(ws, r, 8, int(pendiente),
+                bg=("FFE4E4" if pendiente > 0 else "D4EDDA"),
+                fmt="#,##0", align="right",
+                fc=("991B1B" if pendiente > 0 else "166534"))
+            c_estado = ws.cell(row=r, column=9, value=estado)
+            c_estado.font      = Font(name="Calibri", size=10, bold=True, color=efc)
+            c_estado.fill      = _fill(ebg)
+            c_estado.border    = _border
+            c_estado.alignment = Alignment(horizontal="center", vertical="center")
+            dat(ws, r, 10,
+                fp.date() if pd.notna(fp) else "-",
+                bg=bg, fmt="DD/MM/YYYY", align="center")
+            dat(ws, r, 11,
+                cc.date() if pd.notna(cc) else "-",
+                bg=bg, fmt="DD/MM/YYYY", align="center")
+        else:
+            dat(ws, r, 7,
+                fp.date() if pd.notna(fp) else "-",
+                bg=bg, fmt="DD/MM/YYYY", align="center")
+            dat(ws, r, 8,
+                cc.date() if pd.notna(cc) else "-",
+                bg=bg, fmt="DD/MM/YYYY", align="center")
         r += 1
 
     ws.freeze_panes = "A3"
     if r > 3:
-        ws.auto_filter.ref = f"A2:H{r - 1}"
+        ws.auto_filter.ref = f"A2:{last_col}{r - 1}"
 
 
 def _hoja_pedidos_ocasionales(wb, tabla_df):
@@ -1185,8 +1483,13 @@ def _hoja_dashboard(wb, plan_df, mrp_df, tabla_ocas,
 
     # ══ SECCIÓN 3 — ÓRDENES DE PRODUCCIÓN EN PROCESO ═════════════════════════
     ops_activas = len(ops_df)
-    ops_und = int(pd.to_numeric(ops_df["Cant. Aprobada"], errors="coerce").fillna(0).sum()) \
-              if not ops_df.empty else 0
+    if not ops_df.empty and "Cant. Pendiente" in ops_df.columns:
+        ops_und     = int(pd.to_numeric(ops_df["Cant. Pendiente"], errors="coerce").fillna(0).sum())
+        ops_und_lbl = "Uds. pendientes por producir"
+    else:
+        ops_und     = int(pd.to_numeric(ops_df.get("Cant. Aprobada", pd.Series(dtype=float)),
+                                        errors="coerce").fillna(0).sum())
+        ops_und_lbl = "Unidades en proceso"
     hoy      = pd.Timestamp.today().normalize()
     ops_prox = 0
     if not ops_df.empty and "Fecha Programada" in ops_df.columns:
@@ -1195,7 +1498,7 @@ def _hoja_dashboard(wb, plan_df, mrp_df, tabla_ocas,
 
     blank(12); sec(13, "ORDENES DE PRODUCCION EN PROCESO")
     card(14, 2, "OPs activas",              ops_activas, C_AZUL_MED)
-    card(14, 4, "Unidades en proceso",      ops_und,     C_AZUL_MED)
+    card(14, 4, ops_und_lbl,               ops_und,     C_AZUL_MED)
     card(14, 6, "OPs entregan proximos 15d",ops_prox,    C_NARANJA if ops_prox > 0 else C_AZUL_MED)
 
     # ══ SECCIÓN 4 — PEDIDOS ══════════════════════════════════════════════════
@@ -1590,18 +1893,27 @@ def _hoja_comparativa_comercial(wb, mrp_df, pc_df, pc_name_map=None):
 # FUNCION PRINCIPAL
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run(FI="2026-04-23", FF="2026-12-31", MOD="Random Forest", REF=None):
+def run(FI=None, FF=None, MOD="Random Forest", REF=None):
     """
     Genera el plan de produccion diario y guarda en Excel.
 
     Parametros
     ----------
-    FI  : str   fecha inicio  ej. "2026-04-23"
-    FF  : str   fecha fin     ej. "2026-12-31"
+    FI  : str   fecha inicio  ej. "2026-06-01"  (por defecto: primer dia del mes actual)
+    FF  : str   fecha fin     ej. "2026-12-31"  (por defecto: ultimo dia del año actual)
     MOD : str   modelo de proyeccion: "Random Forest" | "XGBoost" |
                 "Reg. Regularizada" | "Red Neuronal"
     REF : str   nombre exacto de producto, o None para todos
     """
+    # Resolver FI/FF dinamicamente si no se proporcionan
+    if FI is None or FF is None:
+        from datetime import datetime as _dt
+        _hoy = _dt.today()
+        if FI is None:
+            FI = _hoy.replace(day=1).strftime("%Y-%m-%d")
+        if FF is None:
+            FF = _dt(_hoy.year, 12, 31).strftime("%Y-%m-%d")
+
     # Asegurar que paso4_proyeccion puede importarse desde el mismo directorio
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from paso4_proyeccion import proyectar
@@ -1646,10 +1958,10 @@ def run(FI="2026-04-23", FF="2026-12-31", MOD="Random Forest", REF=None):
     codigos_stock    = _cargar_codigos_stock()
     print(f"      {len(lote_min)} referencias con lote minimo definido  |  {len(codigos_stock)} en lista de stock")
 
-    # 5. MRP mensual + ajuste por lote minimo
+    # 5. MRP mensual + ajuste por lote minimo (integrado en el rollforward)
     print("[5/6] Calculando neto a producir (MRP) y ajustando a lotes minimos...")
-    mrp_df       = _mrp_mensual(proj_df, stock, ops_supply, name_to_code)
-    mrp_df       = _aplicar_lote_minimo(mrp_df, lote_min)
+    mrp_df       = _mrp_mensual(proj_df, stock, ops_supply, name_to_code, lote_min)
+    mrp_df       = _aplicar_lote_minimo(mrp_df, lote_min)  # garantiza columnas
     proj_codigos = set(mrp_df["codigo_pt"].unique())
     sin_codigo   = proj_df["producto"].nunique() - len(proj_codigos)
     if sin_codigo:
@@ -1709,16 +2021,26 @@ def run(FI="2026-04-23", FF="2026-12-31", MOD="Random Forest", REF=None):
         except Exception as exc:
             print(f"      Advertencia Plan Comercial: {exc}")
 
+    # Cargar entradas para cruzar con OPs (Producida / Pendiente / Estado)
+    ent_df = None
+    if ARCH_ENTRADAS and os.path.isfile(ARCH_ENTRADAS):
+        try:
+            ent_df = pd.read_excel(ARCH_ENTRADAS)
+            ops_df = _enriquecer_ops_con_entradas(ops_df, ent_df)
+            print("      OPs enriquecidas con Cant. Producida/Pendiente desde entradas.")
+        except Exception as exc:
+            print(f"      Advertencia enriquecimiento OPs: {exc}")
+
     _hoja_plan_diario(wb, plan_total)
     _hoja_plan_mensual(wb, plan_total)
+    _hoja_resumen_mrp(wb, mrp_df)
     _hoja_calendario_semanal(wb, plan_total)
     _hoja_ops_proceso(wb, ops_df)
     _hoja_pedidos_ocasionales(wb, tabla_ocas)
     _hoja_inventario(wb, bodega_df)
 
-    if ARCH_ENTRADAS and os.path.isfile(ARCH_ENTRADAS):
+    if ent_df is not None:
         try:
-            ent_df = pd.read_excel(ARCH_ENTRADAS)
             _hoja_saldo_ops(wb, ops_df, ent_df)
             print("      Hoja Saldo_OPs generada.")
         except Exception as exc:
@@ -1756,7 +2078,7 @@ def run(FI="2026-04-23", FF="2026-12-31", MOD="Random Forest", REF=None):
     print(f"    Guardado en           : {ruta_out}")
     print(SEP + "\n")
 
-    return plan_total
+    return plan_total, ruta_out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1765,8 +2087,10 @@ def run(FI="2026-04-23", FF="2026-12-31", MOD="Random Forest", REF=None):
 if __name__ == "__main__":
 
     # Rango de planificacion (formato "YYYY-MM-DD")
-    FI = "2026-04-23"
-    FF = "2026-12-31"
+    from datetime import datetime as _dt
+    _hoy_main = _dt.today()
+    FI = _hoy_main.replace(day=1).strftime("%Y-%m-%d")
+    FF = _dt(_hoy_main.year, 12, 31).strftime("%Y-%m-%d")
 
     # Modelo de proyeccion — elige UNA opcion:
     #   "Random Forest"

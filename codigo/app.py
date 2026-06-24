@@ -44,7 +44,7 @@ ARCHIVOS = [
      "default_file": "Codigos lote minimo.xlsx",             "preloaded": True},
     {"key": "arch_entradas",  "titulo": "Entradas de inventario (OC)",       "numero": "07",
      "descripcion": "Registro de entradas a bodega con columna OC. Permite cruzar con OPs en proceso para calcular unidades pendientes por OP.",
-     "default_file": None,                                   "preloaded": False, "optional": True},
+     "default_file": "INEDITTO_entradasInventario.xlsx",     "preloaded": False, "optional": True},
     {"key": "arch_plan_comercial", "titulo": "Plan comercial",               "numero": "08",
      "descripcion": "Proyeccion del equipo comercial por producto y mes. Genera hoja Comparativa_Comercial para validar coherencia con el modelo ML.",
      "default_file": "plan_comercial.xlsx",                  "preloaded": True,  "optional": True},
@@ -79,7 +79,8 @@ SHEETS_CONFIG = {
     "Comparativa_Comercial": {"header": 2, "cols": None},
 }
 
-_MAPEOS_PATH = os.path.join(DATA_DIR, "column_mappings.json")
+_MAPEOS_PATH   = os.path.join(DATA_DIR, "column_mappings.json")
+_SETTINGS_PATH = os.path.join(DATA_DIR, "app_settings.json")
 
 # Esquema de columnas esperadas por archivo — usado por el modal de configuracion
 _COL_SCHEMA = {
@@ -220,15 +221,27 @@ class SeedPackPlanner:
         self.root.resizable(True, True)
         self.root.minsize(1024, 640)
 
-        self.fi_var  = tk.StringVar(value="2026-04-01")
-        self.ff_var  = tk.StringVar(value="2026-12-31")
+        _hoy = datetime.today()
+        self.fi_var  = tk.StringVar(value=_hoy.replace(day=1).strftime("%Y-%m-%d"))
+        self.ff_var  = tk.StringVar(value=datetime(_hoy.year, 12, 31).strftime("%Y-%m-%d"))
         self.file_vars = {cfg["key"]: tk.StringVar() for cfg in ARCHIVOS}
         _ah = os.path.join(DATA_DIR, "Archivos Historicos")
+        # 1) Cargar defaults de Archivos Historicos (preloaded o con default_file)
         for _cfg in ARCHIVOS:
-            if _cfg.get("preloaded") and _cfg.get("default_file"):
+            if _cfg.get("default_file"):
                 _p = os.path.join(_ah, _cfg["default_file"])
                 if os.path.isfile(_p):
                     self.file_vars[_cfg["key"]].set(_p)
+        # 2) Sobrescribir con rutas guardadas por el usuario en sesiones anteriores
+        try:
+            if os.path.isfile(_SETTINGS_PATH):
+                with open(_SETTINGS_PATH, encoding="utf-8") as _sf:
+                    _saved = json.load(_sf).get("file_paths", {})
+                for _k, _p in _saved.items():
+                    if _k in self.file_vars and _p and os.path.isfile(_p):
+                        self.file_vars[_k].set(_p)
+        except Exception:
+            pass
 
         self._last_excel  = None
         self._dash_loaded = None
@@ -396,8 +409,6 @@ class SeedPackPlanner:
         hdr.pack(fill="x", padx=24)
         tk.Label(hdr, text="ARCHIVOS DE ENTRADA", font=("Segoe UI", 8, "bold"),
                  bg=C_MAIN, fg=C_GRIS, anchor="w").pack(side="left")
-        self._make_btn(hdr, "  Mapeo de columnas  ", C_CANCEL, C_CANCEL_H,
-                       self._abrir_modal_columnas).pack(side="left", padx=(14, 0), ipady=2)
         tk.Label(hdr, text="6 requeridos + 1 opcional  •  formato .xlsx",
                  font=("Segoe UI", 8), bg=C_MAIN, fg=C_GRIS, anchor="e").pack(side="right")
         tk.Frame(parent, bg=C_DIVIDER, height=1).pack(fill="x", padx=24, pady=(6,16))
@@ -607,7 +618,23 @@ class SeedPackPlanner:
         try:
             for w in self._dash_content.winfo_children():
                 w.destroy()
-            self._lbl_dash_ruta.config(text=os.path.basename(ruta))
+            # Mostrar periodo del plan derivado del Excel
+            try:
+                import pandas as _pd2
+                _fc = next((c for c in plan_df.columns
+                            if "fecha" in str(c).lower() and "entrega" not in str(c).lower()), None)
+                if _fc and not plan_df.empty:
+                    _dates = _pd2.to_datetime(plan_df[_fc], errors="coerce").dropna()
+                    if not _dates.empty:
+                        _periodo = (f"  |  Periodo: {_dates.min().strftime('%d/%m/%Y')}"
+                                    f" → {_dates.max().strftime('%d/%m/%Y')}")
+                    else:
+                        _periodo = ""
+                else:
+                    _periodo = ""
+            except Exception:
+                _periodo = ""
+            self._lbl_dash_ruta.config(text=os.path.basename(ruta) + _periodo)
         except Exception as exc:
             messagebox.showerror("Error de interfaz", str(exc)); return
 
@@ -615,16 +642,29 @@ class SeedPackPlanner:
 
         # Dimensiones responsivas basadas en el ancho del canvas
         self._dash_canvas.update_idletasks()
-        _cw = max(self._dash_canvas.winfo_width() - 2 * PAD, 700)
+        _cw = max(self._dash_canvas.winfo_width() - 2 * PAD, 800)
         self._dash_last_w = self._dash_canvas.winfo_width()
-        _DPI = 100
-        _fh  = max(3.2, min(5.5, _cw / 340))          # alto charts
-        _fw3 = max(2.5, (_cw - 12) / 3 / _DPI)        # ancho filas 3 col
-        _fwd = max(2.0, min(4.5, _cw * 0.22 / _DPI))  # ancho donut
-        _fw1 = max(2.5, (_cw * 0.78 - 12) / 2 / _DPI) # ancho fila 1 (2 anchos + donut)
-        _fw2 = max(3.5, min(9.0, (_cw - 6) / 2 / _DPI)) # ancho fila 3 (2 col)
-        _kv  = max(13, min(22, int(_cw / 80)))         # fuente valor KPI
-        _kl  = max(7,  min(10, int(_cw / 180)))        # fuente etiqueta KPI
+        _DPI = 96
+        _fh  = max(3.8, min(5.5, _cw / 280))             # alto charts (más alto)
+        _fw3 = max(3.0, (_cw - 12) / 3 / _DPI)           # ancho fila 3 col
+        _fwd = max(2.2, min(3.8, _cw * 0.20 / _DPI))     # ancho donut
+        _fw1 = max(3.5, (_cw * 0.80 - 12) / 2 / _DPI)   # ancho fila 1 (2 + donut)
+        _fw2 = max(4.0, min(9.0, (_cw - 6) / 2 / _DPI)) # ancho fila 2 col
+        _kv  = max(13, min(22, int(_cw / 80)))            # fuente valor KPI
+        _kl  = max(7,  min(10, int(_cw / 180)))           # fuente etiqueta KPI
+
+        # Formatter compacto: usa K o M para ejes con numeros grandes
+        def _fmt_units(x, _):
+            if abs(x) >= 1_000_000: return f"{x/1_000_000:.1f}M"
+            if abs(x) >= 1_000:     return f"{int(x/1_000)}K"
+            return f"{int(x):,}"
+
+        # Estilo global matplotlib para este dashboard
+        import matplotlib as _mpl
+        _mpl.rcParams.update({
+            "font.family": "sans-serif",
+            "axes.titlepad": 10,
+        })
 
         # ── KPIs calculados desde hojas fuente ───────────────────────────────
         try:
@@ -704,17 +744,21 @@ class SeedPackPlanner:
             try:
                 top10 = (plan_df.groupby("Referencia")["Cantidad a Producir"]
                          .sum().sort_values(ascending=False).head(10))
-                fig, ax = plt.subplots(figsize=(_fw1, _fh), facecolor=FIG_BG)
+                fig, ax = plt.subplots(figsize=(_fw1, _fh), facecolor=FIG_BG,
+                                       layout="constrained")
                 ax.set_facecolor(FIG_BG)
                 colors_b = plt.cm.Blues_r([0.3 + 0.5*i/max(len(top10)-1,1) for i in range(len(top10))])
-                ax.barh([str(r)[:30] for r in top10.index[::-1]], top10.values[::-1],
-                        color=colors_b, height=0.65)
-                ax.set_title("Top 10 Referencias por Unidades", color=C_DASH_FG, fontsize=9, fontweight="bold", pad=8)
+                labels = [str(r)[:26] for r in top10.index[::-1]]
+                ax.barh(labels, top10.values[::-1], color=colors_b, height=0.65)
+                ax.set_title("Top 10 Referencias por Unidades", color=C_DASH_FG,
+                             fontsize=9, fontweight="bold")
                 ax.tick_params(colors=C_DASH_FG, labelsize=7)
+                ax.yaxis.tick_left()
                 for sp in ax.spines.values(): sp.set_color(C_DASH_BORD)
                 ax.set_xlabel("Unidades", color=C_SID_HINT, fontsize=7)
-                ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x,_: f"{int(x):,}"))
-                plt.tight_layout(pad=1.0)
+                ax.xaxis.set_major_locator(mticker.MaxNLocator(5, integer=True))
+                ax.xaxis.set_major_formatter(mticker.FuncFormatter(_fmt_units))
+                ax.tick_params(axis="x", labelsize=7, colors=C_DASH_FG)
                 card = tk.Frame(charts_row1, bg=BG, padx=6, pady=6)
                 card.pack(side="left", fill="both", expand=True, padx=(0,6))
                 _embed(fig, card)
@@ -727,15 +771,18 @@ class SeedPackPlanner:
                 pc["Fecha"] = pd.to_datetime(pc["Fecha"], errors="coerce")
                 pc["sem"] = pc["Fecha"].dt.to_period("W").astype(str)
                 agg = pc.groupby("sem")["Cantidad a Producir"].sum().reset_index().sort_values("sem")
-                fig, ax = plt.subplots(figsize=(_fw1, _fh), facecolor=FIG_BG)
+                fig, ax = plt.subplots(figsize=(_fw1, _fh), facecolor=FIG_BG,
+                                       layout="constrained")
                 ax.set_facecolor(FIG_BG)
                 xs = range(len(agg))
                 ax.fill_between(xs, agg["Cantidad a Producir"], alpha=0.25, color="#3B82F6")
                 ax.plot(xs, agg["Cantidad a Producir"], color="#3B82F6", linewidth=2,
                         marker="o", markersize=4, markerfacecolor="white")
-                ax.set_title("Produccion Semanal (Unidades)", color=C_DASH_FG, fontsize=9, fontweight="bold", pad=8)
-                # Mostrar solo cada 4ta semana para evitar aplastamiento
-                step = max(1, len(agg) // 10)
+                ax.set_title("Produccion Semanal (Unidades)", color=C_DASH_FG,
+                             fontsize=9, fontweight="bold")
+                # Maximo 8 etiquetas en eje X
+                n_ticks = min(8, len(agg))
+                step = max(1, len(agg) // n_ticks)
                 tick_pos = list(range(0, len(agg), step))
                 tick_lbl = [str(agg["sem"].iloc[i])[-8:] for i in tick_pos]
                 ax.set_xticks(tick_pos)
@@ -743,8 +790,8 @@ class SeedPackPlanner:
                                    color=C_DASH_FG, fontsize=7)
                 ax.tick_params(colors=C_DASH_FG, labelsize=7)
                 for sp in ax.spines.values(): sp.set_color(C_DASH_BORD)
-                ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x,_: f"{int(x):,}"))
-                plt.tight_layout(pad=1.0)
+                ax.yaxis.set_major_locator(mticker.MaxNLocator(5, integer=True))
+                ax.yaxis.set_major_formatter(mticker.FuncFormatter(_fmt_units))
                 card = tk.Frame(charts_row1, bg=BG, padx=6, pady=6)
                 card.pack(side="left", fill="both", expand=True, padx=(0,6))
                 _embed(fig, card)
@@ -778,11 +825,10 @@ class SeedPackPlanner:
         charts_row2 = tk.Frame(self._dash_content, bg=C_DASH_BG)
         charts_row2.pack(fill="x", padx=PAD, pady=(10, 0))
 
-        # Grafica 4 — Top 15 inventario
+        # Grafica 4 — Top 15 inventario (horizontal para mejor legibilidad)
         if not inv_df.empty and "Saldo" in inv_df.columns:
             try:
                 inv_df["Saldo"] = pd.to_numeric(inv_df["Saldo"], errors="coerce").fillna(0)
-                # Usar Referencia si tiene datos; si no, Cod. PT
                 if "Referencia" in inv_df.columns and inv_df["Referencia"].notna().any():
                     ncol = "Referencia"
                 elif "Cod. PT" in inv_df.columns:
@@ -790,17 +836,17 @@ class SeedPackPlanner:
                 else:
                     ncol = inv_df.columns[1]
                 top_inv = inv_df.groupby(ncol)["Saldo"].sum().sort_values(ascending=False).head(15)
-                fig, ax = plt.subplots(figsize=(_fw3, _fh), facecolor=FIG_BG)
+                fig, ax = plt.subplots(figsize=(_fw3, _fh), facecolor=FIG_BG,
+                                       layout="constrained")
                 ax.set_facecolor(FIG_BG)
-                ax.bar(range(len(top_inv)), top_inv.values, color="#10B981", alpha=0.85, width=0.7)
-                ax.set_xticks(range(len(top_inv)))
-                ax.set_xticklabels([str(n)[:18] for n in top_inv.index],
-                                   rotation=45, ha="right", color=C_DASH_FG, fontsize=6)
-                ax.set_title("Top 15 Inventario en Bodega (Unidades)", color=C_DASH_FG, fontsize=9, fontweight="bold", pad=8)
+                labels_inv = [str(n)[:24] for n in top_inv.index[::-1]]
+                ax.barh(labels_inv, top_inv.values[::-1], color="#10B981", alpha=0.85, height=0.65)
+                ax.set_title("Top 15 Inventario en Bodega (Unidades)", color=C_DASH_FG,
+                             fontsize=9, fontweight="bold")
                 ax.tick_params(colors=C_DASH_FG, labelsize=7)
                 for sp in ax.spines.values(): sp.set_color(C_DASH_BORD)
-                ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x,_: f"{int(x):,}"))
-                plt.tight_layout(pad=1.0)
+                ax.xaxis.set_major_locator(mticker.MaxNLocator(5, integer=True))
+                ax.xaxis.set_major_formatter(mticker.FuncFormatter(_fmt_units))
                 card = tk.Frame(charts_row2, bg=BG, padx=6, pady=6)
                 card.pack(side="left", fill="both", expand=True, padx=(0,6))
                 _embed(fig, card)
@@ -833,15 +879,17 @@ class SeedPackPlanner:
                 top_oc = ocas_df[ocas_df["Neto a Producir"]>0].nlargest(10, "Neto a Producir")
                 if not top_oc.empty:
                     ref_col = "Referencia" if "Referencia" in top_oc.columns else top_oc.columns[2]
-                    fig, ax = plt.subplots(figsize=(_fw3, _fh), facecolor=FIG_BG)
+                    fig, ax = plt.subplots(figsize=(_fw3, _fh), facecolor=FIG_BG,
+                                           layout="constrained")
                     ax.set_facecolor(FIG_BG)
-                    ax.barh([str(r)[:28] for r in top_oc[ref_col]][::-1],
+                    ax.barh([str(r)[:24] for r in top_oc[ref_col]][::-1],
                             top_oc["Neto a Producir"].values[::-1], color="#F59E0B", height=0.65)
-                    ax.set_title("Top 10 Pedidos Ocasionales (Neto)", color=C_DASH_FG, fontsize=9, fontweight="bold", pad=8)
+                    ax.set_title("Top 10 Pedidos Ocasionales (Neto)", color=C_DASH_FG,
+                                 fontsize=9, fontweight="bold")
                     ax.tick_params(colors=C_DASH_FG, labelsize=7)
                     for sp in ax.spines.values(): sp.set_color(C_DASH_BORD)
-                    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x,_: f"{int(x):,}"))
-                    plt.tight_layout(pad=1.0)
+                    ax.xaxis.set_major_locator(mticker.MaxNLocator(5, integer=True))
+                    ax.xaxis.set_major_formatter(mticker.FuncFormatter(_fmt_units))
                     card = tk.Frame(charts_row2, bg=BG, padx=6, pady=6)
                     card.pack(side="left", fill="both", expand=True)
                     _embed(fig, card)
@@ -851,32 +899,73 @@ class SeedPackPlanner:
         charts_row3 = tk.Frame(self._dash_content, bg=C_DASH_BG)
         charts_row3.pack(fill="x", padx=PAD, pady=(10, 0))
 
-        # Grafica 7 — Produccion mensual por tipo (stacked bar)
+        # Grafica 7 — Tabla: Resumen mensual de produccion (cifras accionables)
         if not plan_df.empty and "Cantidad a Producir" in plan_df.columns and "Fecha" in plan_df.columns:
             try:
+                cod_c = next((c for c in plan_df.columns
+                              if "codigo" in str(c).lower() or "cód" in str(c).lower()), None)
                 pc3 = plan_df.copy()
-                pc3["Fecha"] = pd.to_datetime(pc3["Fecha"], errors="coerce")
+                pc3["Fecha"]   = pd.to_datetime(pc3["Fecha"], errors="coerce")
+                pc3 = pc3.dropna(subset=["Fecha"])
+                pc3["_cant"]   = pd.to_numeric(pc3["Cantidad a Producir"], errors="coerce").fillna(0)
                 pc3["mes_key"] = pc3["Fecha"].dt.to_period("M").astype(str)
                 pc3["mes_lbl"] = pc3["Fecha"].dt.strftime("%b %Y")
-                ref_lbl = pc3.drop_duplicates("mes_key").sort_values("mes_key").set_index("mes_key")["mes_lbl"]
-                agg_t = pc3.groupby(["mes_key", "Tipo"])["Cantidad a Producir"].sum().unstack(fill_value=0).sort_index()
-                meses_ord = agg_t.index.tolist()
-                labels_m  = [ref_lbl.get(m, m[-7:]) for m in meses_ord]
-                proy_v = agg_t.get("Proyeccion", pd.Series([0]*len(meses_ord), index=meses_ord)).values
-                ocas_v = agg_t.get("Ocasional",  pd.Series([0]*len(meses_ord), index=meses_ord)).values
-                xs = range(len(meses_ord))
-                fig, ax = plt.subplots(figsize=(_fw2, _fh), facecolor=FIG_BG)
-                ax.set_facecolor(FIG_BG)
-                ax.bar(xs, proy_v, color="#3B82F6", label="Proyeccion", width=0.65, alpha=0.9)
-                ax.bar(xs, ocas_v, color="#F59E0B", label="Ocasional",  width=0.65, alpha=0.9, bottom=proy_v)
-                ax.set_xticks(list(xs))
-                ax.set_xticklabels(labels_m, rotation=35, ha="right", color=C_DASH_FG, fontsize=7)
-                ax.set_title("Produccion Mensual por Tipo", color=C_DASH_FG, fontsize=9, fontweight="bold", pad=8)
-                ax.tick_params(colors=C_DASH_FG, labelsize=7)
-                for sp in ax.spines.values(): sp.set_color(C_DASH_BORD)
-                ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{int(x):,}"))
-                ax.legend(fontsize=7, frameon=False, labelcolor=C_DASH_FG, loc="upper right")
-                plt.tight_layout(pad=1.0)
+                _MES_ES = {"Jan": "Ene", "Apr": "Abr", "Aug": "Ago", "Dec": "Dic"}
+                t_serie = (pc3["Tipo"].astype(str).str.lower()
+                           if "Tipo" in pc3.columns else pd.Series("", index=pc3.index))
+
+                filas = []
+                for mk, g in pc3.groupby("mes_key"):
+                    lbl = g["mes_lbl"].iloc[0]
+                    for en, es in _MES_ES.items():
+                        lbl = lbl.replace(en, es)
+                    t     = t_serie.loc[g.index]
+                    proy  = int(g.loc[t == "proyeccion", "_cant"].sum())
+                    ocas  = int(g.loc[t == "ocasional",  "_cant"].sum())
+                    total = int(g["_cant"].sum())
+                    refs  = int(g[cod_c].nunique()) if cod_c else 0
+                    ndias = int(g["Fecha"].dt.normalize().nunique())
+                    uxd   = int(round(total / ndias)) if ndias else 0
+                    filas.append((mk, lbl, proy, ocas, total, refs, ndias, uxd))
+                filas.sort(key=lambda x: x[0])
+
+                tot_tot  = sum(f[4] for f in filas)
+                tot_dias = int(pc3["Fecha"].dt.normalize().nunique())
+                fila_tot = ("TOTAL",
+                            sum(f[2] for f in filas), sum(f[3] for f in filas), tot_tot,
+                            int(pc3[cod_c].nunique()) if cod_c else 0, tot_dias,
+                            int(round(tot_tot / tot_dias)) if tot_dias else 0)
+
+                encabezado = ["Mes", "Proyeccion", "Ocasional", "Total", "Refs", "Dias", "Uds/dia"]
+                cuerpo = [[f[1]] + [f"{v:,}" for v in f[2:]] for f in filas]
+                cuerpo.append([fila_tot[0]] + [f"{v:,}" for v in fila_tot[1:]])
+
+                fig, ax = plt.subplots(figsize=(_fw2, _fh), facecolor=FIG_BG,
+                                       layout="constrained")
+                ax.set_facecolor(FIG_BG); ax.axis("off")
+                ax.set_title("Resumen Mensual de Produccion", color=C_DASH_FG,
+                             fontsize=9, fontweight="bold", pad=6)
+                tbl = ax.table(cellText=cuerpo, colLabels=encabezado,
+                               cellLoc="center", loc="center")
+                tbl.auto_set_font_size(False); tbl.set_fontsize(8)
+                tbl.scale(1, 1.45)
+                n_rows = len(cuerpo)
+                for (r, c), cell in tbl.get_celld().items():
+                    cell.set_edgecolor(C_DASH_BORD)
+                    if r == 0:                       # encabezado
+                        cell.set_facecolor("#1E3A58")
+                        cell.set_text_props(color="#FFFFFF", fontweight="bold")
+                    elif r == n_rows:                # fila TOTAL
+                        cell.set_facecolor("#24405E")
+                        cell.set_text_props(color="#FFFFFF", fontweight="bold")
+                    else:
+                        cell.set_facecolor("#162B45" if r % 2 else "#13243A")
+                        if   c == 1: cell.set_text_props(color="#7EB8E0")  # Proyeccion
+                        elif c == 2: cell.set_text_props(color="#F4B266")  # Ocasional
+                        else:        cell.set_text_props(color=C_DASH_FG)
+                    if c == 0:
+                        cell.set_text_props(ha="left")
+                        cell.PAD = 0.04
                 card = tk.Frame(charts_row3, bg=BG, padx=6, pady=6)
                 card.pack(side="left", fill="both", expand=True, padx=(0, 6))
                 _embed(fig, card)
@@ -890,15 +979,17 @@ class SeedPackPlanner:
                 inv2["Costo Total"] = pd.to_numeric(inv2["Costo Total"], errors="coerce").fillna(0)
                 top_costo = inv2.groupby(ncol2)["Costo Total"].sum().sort_values(ascending=False).head(10)
                 if not top_costo.empty and top_costo.sum() > 0:
-                    fig, ax = plt.subplots(figsize=(_fw2, _fh), facecolor=FIG_BG)
+                    fig, ax = plt.subplots(figsize=(_fw2, _fh), facecolor=FIG_BG,
+                                           layout="constrained")
                     ax.set_facecolor(FIG_BG)
-                    ax.barh([str(r)[:28] for r in top_costo.index[::-1]],
+                    ax.barh([str(r)[:24] for r in top_costo.index[::-1]],
                             top_costo.values[::-1] / 1e6, color="#8B5CF6", height=0.65, alpha=0.9)
-                    ax.set_title("Top 10 Inventario por Costo ($M)", color=C_DASH_FG, fontsize=9, fontweight="bold", pad=8)
+                    ax.set_title("Top 10 Inventario por Costo ($M)", color=C_DASH_FG,
+                                 fontsize=9, fontweight="bold")
                     ax.tick_params(colors=C_DASH_FG, labelsize=7)
                     for sp in ax.spines.values(): sp.set_color(C_DASH_BORD)
+                    ax.xaxis.set_major_locator(mticker.MaxNLocator(5))
                     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:.1f}M"))
-                    plt.tight_layout(pad=1.0)
                     card = tk.Frame(charts_row3, bg=BG, padx=6, pady=6)
                     card.pack(side="left", fill="both", expand=True)
                     _embed(fig, card)
@@ -1009,7 +1100,9 @@ class SeedPackPlanner:
                 vals.append(v)
             self._plan_data.append(vals)
         self._refrescar_plan_tree(self._plan_data)
-        self._plan_lbl.config(text=f"{len(self._plan_data):,} filas  •  {os.path.basename(ruta)}")
+        date_strs = [r[0] for r in self._plan_data if r[0] and r[0] not in ("", "nan", "NaT", "None")]
+        date_range = f"  •  {min(date_strs)} → {max(date_strs)}" if date_strs else ""
+        self._plan_lbl.config(text=f"{len(self._plan_data):,} filas{date_range}  •  {os.path.basename(ruta)}")
 
     def _refrescar_plan_tree(self, data):
         self._plan_tree.delete(*self._plan_tree.get_children())
@@ -1042,7 +1135,7 @@ class SeedPackPlanner:
         rev  = (self._plan_sort_col == col) and not self._plan_sort_rev
         self._plan_sort_col = col; self._plan_sort_rev = rev
         try: self._plan_data.sort(key=lambda r: r[idx], reverse=rev)
-        except: pass
+        except Exception: pass
         self._refrescar_plan_tree(self._plan_data)
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -1652,25 +1745,46 @@ class SeedPackPlanner:
     # VALIDACIÓN AUTOMÁTICA DE COLUMNAS AL CARGAR ARCHIVO
     # ═════════════════════════════════════════════════════════════════════════
 
-    def _leer_columnas_archivo(self, ruta):
-        """Lee las columnas reales de un Excel probando las primeras hojas y headers."""
+    def _leer_columnas_archivo(self, ruta, clave=None):
+        """
+        Lee las columnas reales de un Excel probando todas las hojas y headers.
+        Cuando se proporciona clave, puntua cada combinacion segun cuantos aliases
+        conocidos coinciden y retorna la de mayor puntaje (evita leer hojas auxiliares
+        como 'LISTAS DESPLEGABLES' antes que la hoja de datos real).
+        """
         import pandas as _pd
+        # Construir set de aliases para puntuar candidatos
+        _aliases = set()
+        if clave and clave in _ALIAS_VALIDACION:
+            for _lst in _ALIAS_VALIDACION[clave].values():
+                _aliases.update(a.lower().strip() for a in _lst)
+
+        best_cols  = []
+        best_score = -1
+
         try:
             xls = _pd.ExcelFile(ruta)
-            for sheet in xls.sheet_names[:4]:
+            for sheet in xls.sheet_names[:6]:
                 for hdr_row in [0, 1, 2, 3]:
                     try:
                         tmp = _pd.read_excel(ruta, sheet_name=sheet,
                                               header=hdr_row, nrows=1)
                         real = [str(c).strip() for c in tmp.columns
                                 if "Unnamed" not in str(c) and str(c).strip()]
-                        if len(real) >= 3:
+                        if len(real) < 3:
+                            continue
+                        score = (sum(1 for c in real if c.lower().strip() in _aliases)
+                                 if _aliases else 0)
+                        if score > best_score:
+                            best_score = score
+                            best_cols  = real
+                        if score >= 3:   # coincidencias suficientes — no seguir buscando
                             return real
                     except Exception:
                         pass
         except Exception:
             pass
-        return []
+        return best_cols
 
     def _campo_cubierto(self, campo, clave, file_cols_lower, mapeos):
         """True si el campo está cubierto: por nombre exacto, alias, patron o mapeo guardado."""
@@ -1715,7 +1829,7 @@ class SeedPackPlanner:
         """Retorna lista de (campo, descr, sugerencia) para campos requeridos no encontrados."""
         if clave not in _COL_SCHEMA:
             return []
-        file_cols = self._leer_columnas_archivo(ruta)
+        file_cols = self._leer_columnas_archivo(ruta, clave)
         if not file_cols:
             return []
         file_cols_lower = {c.lower().strip(): c for c in file_cols}
@@ -1887,7 +2001,7 @@ class SeedPackPlanner:
         if not ruta or not os.path.isfile(ruta) or clave not in _COL_SCHEMA:
             return
         try:
-            file_cols = self._leer_columnas_archivo(ruta)
+            file_cols = self._leer_columnas_archivo(ruta, clave)
             problemas = self._detectar_problemas(ruta, clave)
             if problemas:
                 self._abrir_modal_validacion(ruta, clave, problemas, file_cols)
@@ -2180,12 +2294,24 @@ class SeedPackPlanner:
                 # Archivos manuales: usar directamente desde donde el usuario los tenga
                 var.set(ruta)
 
+            # Persistir la ruta seleccionada para la proxima sesion
+            self._guardar_settings()
+
             # Validar columnas del archivo cargado — abre modal solo si hay problemas
             if cfg and cfg.get("key"):
                 clave = cfg["key"]
                 rv    = ruta_final
                 self.root.after(450, lambda r=rv, k=clave:
                                 self._validar_archivo_cargado(r, k))
+
+    def _guardar_settings(self):
+        """Persiste las rutas de archivos seleccionadas para recuperarlas al reabrir."""
+        try:
+            data = {"file_paths": {k: v.get() for k, v in self.file_vars.items() if v.get()}}
+            with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     # ── Validacion ────────────────────────────────────────────────────────────
 
@@ -2432,7 +2558,7 @@ class SeedPackPlanner:
             ruta = os.path.join(DATA_DIR, "Resultado Final", "orden_produccion_final.xlsx")
             try:
                 import main as _main
-                _main.run(
+                ruta_resultado = _main.run(
                     FI=params["fi"], FF=params["ff"], REF=None,
                     arch_ventas=params["arch_ventas"],
                     arch_ops_hist=params["arch_ops_hist"],
@@ -2443,8 +2569,10 @@ class SeedPackPlanner:
                     arch_entradas=params["arch_entradas"],
                     arch_plan_comercial=params["arch_plan_comercial"],
                 )
+                if ruta_resultado and os.path.isfile(ruta_resultado):
+                    ruta = ruta_resultado
                 sys.stdout = old_out
-                dlg.after(0, lambda: _done(True, ruta))
+                dlg.after(0, lambda r=ruta: _done(True, r))
             except Exception as exc:
                 sys.stdout = old_out
                 dlg.after(0, lambda: _done(False, str(exc)))
@@ -2922,7 +3050,7 @@ class SeedPackPlanner:
             "Sin Iniciar": "#FFE4E4",
         }
         for row in data:
-            estado = row[8] if len(row) > 8 else ""
+            estado = row[7] if len(row) > 7 else ""
             tag = estado.replace(" ", "_")
             self._saldo_tree.insert("", "end", values=row, tags=(tag,))
         for estado, bg in TAG_BG.items():
