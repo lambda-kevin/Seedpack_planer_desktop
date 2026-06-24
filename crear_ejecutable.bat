@@ -98,13 +98,16 @@ echo.
 echo.
 if exist "dist\SeedPack Planner.exe" (
     echo  ============================================================
-    echo   Ejecutable generado exitosamente:
-    echo   dist\SeedPack Planner.exe
+    echo   Ejecutable generado exitosamente.
+    echo   Copiando a app\ ...
     echo  ============================================================
     echo.
-    echo  ENTREGA AL CLIENTE: Copia el .exe a la carpeta app\
-    echo  junto con las subcarpetas Archivos Historicos\,
-    echo  Resultado Final\, datos_pipeline\ y graficas\.
+    copy /Y "dist\SeedPack Planner.exe" "app\SeedPack Planner.exe" >nul
+    if errorlevel 1 (
+        echo  ADVERTENCIA: No se pudo copiar a app\. Copia manual desde dist\.
+    ) else (
+        echo  Listo: app\SeedPack Planner.exe actualizado.
+    )
     echo.
 ) else (
     echo  ERROR: No se genero el ejecutable. Revisa los mensajes arriba.
