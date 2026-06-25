@@ -738,6 +738,12 @@ class SeedPackPlanner:
         # ── Fila 1 de graficas ────────────────────────────────────────────────
         charts_row1 = tk.Frame(self._dash_content, bg=C_DASH_BG)
         charts_row1.pack(fill="x", padx=PAD, pady=(10, 0))
+        # Layout responsivo: 3 columnas con proporcion fija 2:2:1 (chart, chart, donut)
+        # que escalan juntas en cualquier resolucion/escalado de pantalla.
+        charts_row1.columnconfigure(0, weight=2, uniform="r1")
+        charts_row1.columnconfigure(1, weight=2, uniform="r1")
+        charts_row1.columnconfigure(2, weight=1, uniform="r1")
+        charts_row1.rowconfigure(0, weight=1)
 
         # Grafica 1 — Top 10 referencias por unidades
         if not plan_df.empty and "Cantidad a Producir" in plan_df.columns and "Referencia" in plan_df.columns:
@@ -760,7 +766,7 @@ class SeedPackPlanner:
                 ax.xaxis.set_major_formatter(mticker.FuncFormatter(_fmt_units))
                 ax.tick_params(axis="x", labelsize=7, colors=C_DASH_FG)
                 card = tk.Frame(charts_row1, bg=BG, padx=6, pady=6)
-                card.pack(side="left", fill="both", expand=True, padx=(0,6))
+                card.grid(row=0, column=0, sticky="nsew", padx=(0,6))
                 _embed(fig, card)
             except: pass
 
@@ -793,7 +799,7 @@ class SeedPackPlanner:
                 ax.yaxis.set_major_locator(mticker.MaxNLocator(5, integer=True))
                 ax.yaxis.set_major_formatter(mticker.FuncFormatter(_fmt_units))
                 card = tk.Frame(charts_row1, bg=BG, padx=6, pady=6)
-                card.pack(side="left", fill="both", expand=True, padx=(0,6))
+                card.grid(row=0, column=1, sticky="nsew", padx=(0,6))
                 _embed(fig, card)
             except: pass
 
@@ -803,21 +809,24 @@ class SeedPackPlanner:
                 n_p = int((plan_df["Tipo"]=="Proyeccion").sum())
                 n_o = int((plan_df["Tipo"]=="Ocasional").sum())
                 if n_p + n_o > 0:
-                    fig, ax = plt.subplots(figsize=(_fwd, _fh), facecolor=FIG_BG)
+                    # figsize cuadrado: el donut se mantiene circular y centrado al
+                    # escalar; layout="constrained" evita recortes de titulo/leyenda.
+                    fig, ax = plt.subplots(figsize=(_fwd, _fh), facecolor=FIG_BG,
+                                           layout="constrained")
                     ax.set_facecolor(FIG_BG)
+                    ax.set_aspect("equal")
                     wedges, _, autotexts = ax.pie([n_p, n_o], colors=["#3B82F6","#EA580C"],
-                        autopct="%1.0f%%", startangle=90,
+                        autopct="%1.0f%%", startangle=90, radius=1.0,
                         wedgeprops=dict(width=0.55, edgecolor=FIG_BG, linewidth=2), pctdistance=0.75)
                     for at in autotexts:
                         at.set_color("white"); at.set_fontsize(9); at.set_fontweight("bold")
                     ax.set_title("Tipo de Orden", color=C_DASH_FG, fontsize=9, fontweight="bold", pad=8)
                     patches = [mpatches.Patch(color=c, label=l)
                                for c, l in zip(["#3B82F6","#EA580C"], ["Proyeccion","Ocasional"])]
-                    ax.legend(handles=patches, loc="lower center", fontsize=7,
-                              frameon=False, labelcolor=C_DASH_FG, ncol=2)
-                    plt.tight_layout(pad=1.0)
+                    ax.legend(handles=patches, loc="upper center", bbox_to_anchor=(0.5, -0.02),
+                              fontsize=7, frameon=False, labelcolor=C_DASH_FG, ncol=2)
                     card = tk.Frame(charts_row1, bg=BG, padx=6, pady=6)
-                    card.pack(side="left", fill="y")
+                    card.grid(row=0, column=2, sticky="nsew")
                     _embed(fig, card)
             except: pass
 
@@ -2623,6 +2632,8 @@ class SeedPackPlanner:
                  bg=C_HEADER, fg="white").pack(side="left", padx=24, pady=12)
         self._make_btn(topbar, "  Analizar  ", C_ACENTO, C_ACENTO_H,
                        self._analizar_pedidos).pack(side="right", padx=16, pady=8, ipady=4)
+        self._make_btn(topbar, "  Exportar Excel  ", C_SUCCESS, C_SUCCESS_H,
+                       self._exportar_gestion).pack(side="right", padx=(0, 4), pady=8, ipady=4)
 
         # ── KPI cards ────────────────────────────────────────────────────────
         kpi_row = tk.Frame(self.tab_gestion, bg=C_MAIN)
@@ -2662,15 +2673,30 @@ class SeedPackPlanner:
                                    font=("Segoe UI", 8), bg=C_MAIN, fg=C_GRIS)
         self._gest_lbl.pack(side="left")
 
-        # ── Leyenda ───────────────────────────────────────────────────────────
+        # ── Barra de filtros (Estado + Origen O.C) — botones combinables ───────
+        self._gest_filtro_estado = "Todos"
+        self._gest_filtro_origen = "Todos"
+        self._gest_chips = {}
         ley = tk.Frame(self.tab_gestion, bg=C_MAIN)
-        ley.pack(fill="x", padx=16, pady=(4, 0))
-        for label, bg_c in [("OK — Cubierto", "#D4EDDA"), ("Solicitar OP", "#FFF3CD")]:
-            f = tk.Frame(ley, bg=bg_c, padx=8, pady=3,
-                         highlightbackground=C_DIVIDER, highlightthickness=1)
-            f.pack(side="left", padx=(0, 8))
-            tk.Label(f, text=label, font=("Segoe UI", 8, "bold"),
-                     bg=bg_c, fg=C_TEXTO).pack()
+        ley.pack(fill="x", padx=16, pady=(6, 0))
+
+        tk.Label(ley, text="Estado:", font=("Segoe UI", 8, "bold"),
+                 bg=C_MAIN, fg=C_GRIS).pack(side="left", padx=(0, 6))
+        for val, abg, afg in [("Todos", "#475569", "white"),
+                              ("OK — Cubierto", "#16A34A", "white"),
+                              ("Solicitar OP", "#D97706", "white")]:
+            self._mk_gest_chip(ley, "estado", val, abg, afg)
+
+        tk.Frame(ley, bg=C_MAIN, width=24).pack(side="left")
+
+        tk.Label(ley, text="Origen O.C:", font=("Segoe UI", 8, "bold"),
+                 bg=C_MAIN, fg=C_GRIS).pack(side="left", padx=(0, 6))
+        for val, abg, afg in [("Todos", "#475569", "white"),
+                              ("Abastecimiento", "#2563EB", "white"),
+                              ("En firme", "#BE185D", "white")]:
+            self._mk_gest_chip(ley, "origen", val, abg, afg)
+
+        self._restyle_gest_chips()
 
         # ── Treeview ──────────────────────────────────────────────────────────
         tbl = tk.Frame(self.tab_gestion, bg=C_MAIN)
@@ -2715,18 +2741,149 @@ class SeedPackPlanner:
         for row in data:
             estado = row[12] if len(row) > 12 else ""
             tag = "op_req" if "Solicitar" in estado else "ok_row"
-            self._gest_tree.insert("", "end", values=row, tags=(tag,))
+            # Solo se muestran las 14 columnas visibles; row[14] (origen) es metadata
+            self._gest_tree.insert("", "end", values=row[:14], tags=(tag,))
         self._gest_tree.tag_configure("op_req", background="#FFF3CD")
         self._gest_tree.tag_configure("ok_row", background="#D4EDDA")
 
+    def _mk_gest_chip(self, parent, grupo, valor, active_bg, active_fg):
+        """Crea un boton-chip de filtro (Estado u Origen) que se resalta al estar activo."""
+        f = tk.Frame(parent, bg="white", padx=10, pady=4, cursor="hand2",
+                     highlightbackground=C_DIVIDER, highlightthickness=1)
+        f.pack(side="left", padx=(0, 6))
+        lbl = tk.Label(f, text=valor, font=("Segoe UI", 8, "bold"),
+                       bg="white", fg=C_TEXTO, cursor="hand2")
+        lbl.pack()
+
+        def _click(_=None):
+            if grupo == "estado":
+                self._gest_filtro_estado = valor
+            else:
+                self._gest_filtro_origen = valor
+            self._restyle_gest_chips()
+            self._filtrar_gestion()
+
+        f.bind("<Button-1>", _click)
+        lbl.bind("<Button-1>", _click)
+        self._gest_chips[(grupo, valor)] = (f, lbl, active_bg, active_fg)
+
+    def _restyle_gest_chips(self):
+        for (grupo, valor), (f, lbl, abg, afg) in self._gest_chips.items():
+            activo = valor == (self._gest_filtro_estado if grupo == "estado"
+                               else self._gest_filtro_origen)
+            if activo:
+                f.configure(bg=abg, highlightbackground=abg)
+                lbl.configure(bg=abg, fg=afg)
+            else:
+                f.configure(bg="white", highlightbackground=C_DIVIDER)
+                lbl.configure(bg="white", fg=C_TEXTO)
+
+    def _set_kpis_gestion(self, rows):
+        total_ped = sum(int(str(r[2]).replace(",", "")) for r in rows)
+        total_sal = sum(int(str(r[3]).replace(",", "")) for r in rows)
+        refs_op   = sum(1 for r in rows if r[12] == "Solicitar OP")
+        total_pro = sum(int(str(r[11]).replace(",", "")) for r in rows)
+        self._gest_kpi["total_pedidos"].config(text=f"{total_ped:,}")
+        self._gest_kpi["total_saldo"].config(text=f"{total_sal:,}")
+        self._gest_kpi["refs_op"].config(text=f"{refs_op:,}")
+        self._gest_kpi["total_producir"].config(text=f"{total_pro:,}")
+
     def _filtrar_gestion(self, *_):
-        q = self._gest_search.get().lower()
-        filtered = [r for r in self._gestion_data
-                    if not q or any(q in str(v).lower() for v in r)]
+        q  = self._gest_search.get().lower()
+        fe = getattr(self, "_gest_filtro_estado", "Todos")
+        fo = getattr(self, "_gest_filtro_origen", "Todos")
+        filtered = []
+        for r in self._gestion_data:
+            if q and not any(q in str(v).lower() for v in r[:14]):
+                continue
+            estado = r[12]
+            if fe == "OK — Cubierto" and estado != "OK":
+                continue
+            if fe == "Solicitar OP" and estado != "Solicitar OP":
+                continue
+            origins = r[14] if len(r) > 14 else set()
+            if fo != "Todos" and fo not in origins:
+                continue
+            filtered.append(r)
+
+        self._gest_filtrado = filtered
         self._refrescar_gest_tree(filtered)
+        self._set_kpis_gestion(filtered)
+        total = len(self._gestion_data)
+        extra = f"  (de {total:,})" if len(filtered) != total else ""
         self._gest_lbl.config(
-            text=f"{len(filtered):,} referencias" +
-                 (f"  (de {len(self._gestion_data):,})" if len(filtered) != len(self._gestion_data) else ""))
+            text=f"{len(filtered):,} referencias{extra}{getattr(self, '_gest_nota', '')}")
+
+    def _exportar_gestion(self):
+        """Exporta la gestion de pedidos a Excel respetando el filtro activo."""
+        rows = getattr(self, "_gest_filtrado", None) or self._gestion_data
+        if not rows:
+            messagebox.showwarning(
+                "Sin datos", "Presiona Analizar para generar la gestion de pedidos.")
+            return
+        fe = getattr(self, "_gest_filtro_estado", "Todos")
+        fo = getattr(self, "_gest_filtro_origen", "Todos")
+        suf = [s.replace("—", "").replace(" ", "_").strip("_")
+               for s in (fe, fo) if s != "Todos"]
+        nombre = "Gestion_Pedidos" + ("_" + "_".join(suf) if suf else "") + ".xlsx"
+        dest = filedialog.asksaveasfilename(
+            title="Exportar gestion de pedidos", defaultextension=".xlsx",
+            initialfile=nombre, filetypes=[("Excel", "*.xlsx")])
+        if not dest:
+            return
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+            from openpyxl.utils import get_column_letter
+
+            HEADERS = ["Codigo", "Descripcion", "Pedidos", "Saldo Pendiente",
+                       "Stock Bodega", "OPs Proceso", "Proyeccion ML", "Disponible",
+                       "Demanda Total", "Deficit", "Lote Minimo", "A Producir",
+                       "Estado", "Origen O.C", "Justificacion"]
+            WIDTHS  = [18, 40, 10, 15, 15, 15, 15, 15, 15, 12, 14, 14, 16, 18, 80]
+            NUMERIC = {4, 5, 6, 7, 8, 9, 10, 11, 12}   # columnas con miles
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Gestion_Pedidos"
+            bord = Border(*[Side(style="thin", color="BFBFBF")] * 4)
+
+            for ci, (h, w) in enumerate(zip(HEADERS, WIDTHS), 1):
+                c = ws.cell(row=1, column=ci, value=h)
+                c.font = Font(bold=True, color="FFFFFF", size=11)
+                c.fill = PatternFill(fill_type="solid", fgColor="1F4E79")
+                c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                c.border = bord
+                ws.column_dimensions[get_column_letter(ci)].width = w
+            ws.row_dimensions[1].height = 30
+
+            for ri, r in enumerate(rows, 2):
+                is_op  = (r[12] == "Solicitar OP")
+                bg     = "FFF3CD" if is_op else "D4EDDA"
+                origen = " + ".join(sorted(r[14])) if len(r) > 14 and r[14] else ""
+                vals   = list(r[:13]) + [origen, r[13]]
+                for ci, val in enumerate(vals, 1):
+                    if ci in NUMERIC and isinstance(val, str):
+                        try:
+                            val = int(val.replace(",", ""))
+                        except ValueError:
+                            pass
+                    cell = ws.cell(row=ri, column=ci, value=val)
+                    cell.fill = PatternFill(fill_type="solid", fgColor=bg)
+                    cell.border = bord
+                    cell.alignment = Alignment(
+                        horizontal="center" if ci not in (2, 15) else "left",
+                        vertical="center", wrap_text=(ci == 15))
+                    if ci in NUMERIC and isinstance(cell.value, int):
+                        cell.number_format = "#,##0"
+
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = f"A1:{get_column_letter(len(HEADERS))}{len(rows) + 1}"
+            wb.save(dest)
+            if messagebox.askyesno("Exportado", f"Guardado en:\n{dest}\n\n¿Abrir ahora?"):
+                os.startfile(dest)
+        except Exception as exc:
+            messagebox.showerror("Error al exportar", str(exc))
 
     def _analizar_pedidos(self):
         import math
@@ -2788,12 +2945,31 @@ class SeedPackPlanner:
                         or col_up.get("REFERENCIA")
                         or "DESCRIPCION")
             ped_col  = col_up.get("PEDIDO", "PEDIDO")
+            # Columna "O.C del cliente #": para clasificar origen del pedido
+            oc_col   = (col_up.get("O.C DEL CLIENTE #")
+                        or col_up.get("O.C DEL CLIENTE")
+                        or next((v for k, v in col_up.items()
+                                 if "O.C" in k or "OC DEL CLIENTE" in k
+                                 or ("CLIENTE" in k and "#" in k)), None))
 
             df_raw[sp_col] = pd.to_numeric(df_raw[sp_col], errors="coerce").fillna(0)
-            needed = [c for c in [ped_col, cod_col, desc_col, sp_col] if c in df_raw.columns]
+            needed = [c for c in [ped_col, cod_col, desc_col, sp_col, oc_col]
+                      if c and c in df_raw.columns]
             df_pend = df_raw[df_raw[sp_col] > 0][needed].copy()
             df_pend = df_pend[df_pend[cod_col].notna()]
             df_pend[cod_col] = df_pend[cod_col].astype(str).str.strip()
+
+            # Origen de la O.C: "Abastecimiento" vs "En firme" (cualquier otro nombre).
+            # Una referencia puede tener pedidos de ambos tipos -> se guarda el conjunto.
+            # str() dentro de la funcion: las celdas vacias (NaN) quedan como "nan".
+            def _clasif_origen(v):
+                return "Abastecimiento" if "abastec" in str(v).strip().lower() else "En firme"
+            if oc_col and oc_col in df_pend.columns:
+                df_pend["_origen"] = df_pend[oc_col].apply(_clasif_origen)
+            else:
+                df_pend["_origen"] = "En firme"
+            origen_por_cod = df_pend.groupby(cod_col)["_origen"].agg(
+                lambda s: set(s)).to_dict()
         except Exception as exc:
             messagebox.showerror("Error leyendo cuadro de pedidos", str(exc)); return
 
@@ -2922,28 +3098,19 @@ class SeedPackPlanner:
             else:
                 parts.append(f"Cubierto. Excedente: {disp - total:,} uds.")
 
+            origins = origen_por_cod.get(cod, {"En firme"})
             rows.append([cod, desc, n_ped,
                          f"{saldo:,}", f"{stock:,}", f"{ops:,}", f"{proy:,}",
                          f"{disp:,}", f"{total:,}", f"{deficit:,}",
-                         f"{lmin:,}", f"{a_prod:,}", estado, " ".join(parts)])
+                         f"{lmin:,}", f"{a_prod:,}", estado, " ".join(parts),
+                         origins])
 
-        self._gestion_data  = rows
+        self._gestion_data   = rows
         self._gestion_loaded = path_cuadro
-        self._refrescar_gest_tree(rows)
-
-        # ── KPIs ──────────────────────────────────────────────────────────────
-        total_ped = sum(int(str(r[2])) for r in rows)
-        total_sal = sum(int(str(r[3]).replace(",", "")) for r in rows)
-        refs_op   = sum(1 for r in rows if r[12] == "Solicitar OP")
-        total_pro = sum(int(str(r[11]).replace(",", "")) for r in rows)
-        self._gest_kpi["total_pedidos"].config(text=f"{total_ped:,}")
-        self._gest_kpi["total_saldo"].config(text=f"{total_sal:,}")
-        self._gest_kpi["refs_op"].config(text=f"{refs_op:,}")
-        self._gest_kpi["total_producir"].config(text=f"{total_pro:,}")
-
-        nota_proy = "  •  Con proyeccion ML" if tiene_proy else "  •  Sin proyeccion ML (ejecuta el plan primero)"
-        self._gest_lbl.config(
-            text=f"{len(rows):,} referencias{nota_proy}")
+        self._gest_nota = ("  •  Con proyeccion ML" if tiene_proy
+                           else "  •  Sin proyeccion ML (ejecuta el plan primero)")
+        # Pinta tabla + KPIs respetando el filtro activo (busqueda/estado/origen)
+        self._filtrar_gestion()
 
 
     # ═════════════════════════════════════════════════════════════════════════
